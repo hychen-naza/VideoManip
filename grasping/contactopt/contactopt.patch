@@ -1,0 +1,321 @@
+diff --git a/contactopt/hand_object.py b/contactopt/hand_object.py
+index c9fa62e..6961dc4 100644
+--- a/contactopt/hand_object.py
++++ b/contactopt/hand_object.py
+@@ -129,6 +129,7 @@ class HandObject:
+         """Load from another HandObject obj, potentially with augmentation"""
+         self.hand_beta = np.array(ho.hand_beta)
+         self.hand_pose = np.array(ho.hand_pose)
++        self.hand_contact = np.array(ho.hand_contact)
+         self.hand_mTc = np.array(ho.hand_mTc)
+         self.obj_verts = ho.obj_verts
+         self.obj_faces = ho.obj_faces
+@@ -183,9 +184,9 @@ class HandObject:
+         """Runs forward_mano, computing the hand vertices and joints based on pose/beta parameters.
+          Handles numpy-pytorch-numpy conversion"""
+         if self.hand_pose.shape[0] == 48:   # Special case when we're loading GT honnotate
+-            mano_model = ManoLayer(mano_root='mano/models', joint_rot_mode="axisang", use_pca=False, center_idx=None, flat_hand_mean=True)
++            mano_model = ManoLayer(mano_root='<repo>/assets/mano/models', joint_rot_mode="axisang", use_pca=False, center_idx=None, flat_hand_mean=True)
+         else:   # Everything else
+-            mano_model = ManoLayer(mano_root='mano/models', use_pca=True, ncomps=15, side='right', flat_hand_mean=False)
++            mano_model = ManoLayer(mano_root='<repo>/assets/mano/models', use_pca=True, ncomps=15, side='right', flat_hand_mean=False)
+ 
+         pose_tensor = torch.Tensor(self.hand_pose).unsqueeze(0)
+         beta_tensor = torch.Tensor(self.hand_beta).unsqueeze(0)
+diff --git a/contactopt/optimize_pose.py b/contactopt/optimize_pose.py
+index d3cb3cc..0775651 100644
+--- a/contactopt/optimize_pose.py
++++ b/contactopt/optimize_pose.py
+@@ -26,7 +26,7 @@ def optimize_pose(data, hand_contact_target, obj_contact_target, n_iter=250, lr=
+     opt_vector = torch.zeros((batch_size, ncomps + 6 + 3), device=device)   # 3 hand rot, 3 hand trans, 3 obj rot
+     opt_vector.requires_grad = True
+ 
+-    mano_model = ManoLayer(mano_root='mano/models', use_pca=True, ncomps=ncomps, side='right', flat_hand_mean=False).to(device)
++    mano_model = ManoLayer(mano_root='<repo>/assets/mano/models', use_pca=True, ncomps=ncomps, side='right', flat_hand_mean=False).to(device)
+ 
+     if data['obj_sampled_idx'].numel() > 1:
+         obj_normals_sampled = util.batched_index_select(data['obj_normals_aug'], 1, data['obj_sampled_idx'])
+diff --git a/contactopt/pointnet.py b/contactopt/pointnet.py
+index d6c0bb3..c95e831 100644
+--- a/contactopt/pointnet.py
++++ b/contactopt/pointnet.py
+@@ -7,7 +7,7 @@ from torch.nn import Sequential as Seq, Linear as Lin, ReLU, BatchNorm1d as BN
+ from torch_geometric.datasets import ModelNet
+ import torch_geometric.transforms as T
+ from torch_geometric.data import DataLoader
+-from torch_geometric.nn import PointConv, fps, radius, global_max_pool, knn_interpolate
++from torch_geometric.nn import PointNetConv, fps, radius, global_max_pool, knn_interpolate
+ 
+ 
+ class SAModule(torch.nn.Module):
+@@ -15,7 +15,7 @@ class SAModule(torch.nn.Module):
+         super(SAModule, self).__init__()
+         self.ratio = ratio
+         self.r = r
+-        self.conv = PointConv(nn)
++        self.conv = PointNetConv(nn)
+ 
+     def forward(self, x, pos, batch):
+         idx = fps(pos, batch, ratio=self.ratio)
+diff --git a/contactopt/run_contactopt.py b/contactopt/run_contactopt.py
+index 2411c92..7ff9f4f 100644
+--- a/contactopt/run_contactopt.py
++++ b/contactopt/run_contactopt.py
+@@ -19,6 +19,7 @@ import os
+ from torch.utils.data import DataLoader
+ import pytorch3d
+ import numpy as np
++import pdb
+ 
+ 
+ def get_newest_checkpoint():
+@@ -44,7 +45,7 @@ def run_contactopt(args):
+     """
+     print('Running split', args.split)
+     dataset = ContactDBDataset(args.test_dataset, min_num_cont=args.min_cont)
+-    shuffle = args.vis or args.partial > 0
++    shuffle = False # args.vis or args.partial > 0
+     print('Shuffle:', shuffle)
+     test_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=6, collate_fn=ContactDBDataset.collate_fn)
+     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+@@ -54,13 +55,14 @@ def run_contactopt(args):
+     model.eval()
+ 
+     all_data = list()
+-
++    # pdb.set_trace()
+     for idx, data in enumerate(tqdm(test_loader)):
+         data_gpu = util.dict_to_device(data, device)
+         batch_size = data['obj_sampled_idx'].shape[0]
+-
++        
+         if args.split != 'fine':
+             with torch.no_grad():
++                # pdb.set_trace()
+                 network_out = model(data_gpu['hand_verts_aug'], data_gpu['hand_feats_aug'], data_gpu['obj_sampled_verts_aug'], data_gpu['obj_feats_aug'])
+                 hand_contact_target = util.class_to_val(network_out['contact_hand']).unsqueeze(2)
+                 obj_contact_target = util.class_to_val(network_out['contact_obj']).unsqueeze(2)
+@@ -132,10 +134,21 @@ def run_contactopt(args):
+             # out_ho.calc_dist_contact(hand=True, obj=True)
+ 
+             all_data.append({'gt_ho': gt_ho, 'in_ho': in_ho, 'out_ho': out_ho})
++            image_name = args.image_names[idx*args.batch_size + b]
++            output_dir = os.path.join("<data_root>", args.object_name, "optimized_hand_object")
++            os.makedirs(output_dir, exist_ok=True)
++            #print(f"Saving optimized hand params to {os.path.join(output_dir, f'{image_name}_optimized_hand_params.npy')}")
++            # pdb.set_trace()
++            np.save(os.path.join(output_dir, f"{image_name}_optimized_hand_params.npy"), {
++                'hand_pose': out_pose.detach().cpu().numpy()[b,:3], #[:,:3]
++                'hand_joint': out_ho.hand_joints,
++                'vis_hand_pose': out_ho.hand_pose,
++                'vis_hand_beta': out_ho.hand_beta,
++                'vis_hand_mTc': out_ho.hand_mTc,
++            })
+ 
+         if args.vis:
+-            show_optimization(data, opt_state, hand_contact_target.detach().cpu().numpy(), obj_contact_upscale.detach().cpu().numpy(),
+-                              is_video=args.video, vis_method=args.vis_method)
++            show_optimization(data, opt_state, hand_contact_target.detach().cpu().numpy(), obj_contact_upscale.detach().cpu().numpy(), is_video=args.video, vis_method=args.vis_method)
+ 
+         if idx >= args.partial > 0:   # Speed up for eval
+             break
+diff --git a/contactopt/run_user_demo.py b/contactopt/run_user_demo.py
+index edcfcf8..0fe9f71 100644
+--- a/contactopt/run_user_demo.py
++++ b/contactopt/run_user_demo.py
+@@ -9,67 +9,112 @@ import contactopt.util as util
+ import contactopt.arguments as arguments
+ from contactopt.hand_object import HandObject
+ from contactopt.run_contactopt import run_contactopt
++import os
++import glob
++import pdb
++import argparse
++import sys
++def create_demo_dataset(object_name, image_names):
++    # obj_mesh = trimesh.load('data/demo_obj.obj')    # Load object mesh
++    # with open('data/demo_mano.json') as json_file:  # Load mano parameters
++    #     mano_params = json.load(json_file)
+ 
++    # # Initialize the HandObject class with the given mano parameters and object mesh.
++    # # Note that pose must be represented using the 15-dimensional PCA space
++    # ho_pred = HandObject()
++    # ho_pred.load_from_mano_params(hand_beta=mano_params['beta'], hand_pose=mano_params['pose'], hand_trans=mano_params['trans'],
++    #                               obj_faces=obj_mesh.faces, obj_verts=obj_mesh.vertices)
++    # pdb.set_trace()
+ 
+-def create_demo_dataset():
+-    obj_mesh = trimesh.load('data/demo_obj.obj')    # Load object mesh
+-    with open('data/demo_mano.json') as json_file:  # Load mano parameters
+-        mano_params = json.load(json_file)
+ 
+-    # Initialize the HandObject class with the given mano parameters and object mesh.
+-    # Note that pose must be represented using the 15-dimensional PCA space
+-    ho_pred = HandObject()
+-    ho_pred.load_from_mano_params(hand_beta=mano_params['beta'], hand_pose=mano_params['pose'], hand_trans=mano_params['trans'],
+-                                  obj_faces=obj_mesh.faces, obj_verts=obj_mesh.vertices)
++    all_objects = [object_name]
++    FOLDER_DIR = "<data_root>"
++    folder_name = os.path.join(FOLDER_DIR, all_objects[0])
++    hand_params_dir = os.path.join(folder_name, "human_hand")
++    object_dir = os.path.join(folder_name, "obj_mesh")
++    dataset = []
++    exist_image_names = []
++    for image_name in image_names:
++        if (not os.path.exists(os.path.join(hand_params_dir, f"{image_name}_mano_data.npy"))) or (not os.path.exists(os.path.join(object_dir, f"{image_name}_object_mesh_grasp.obj"))):
++            continue
++        exist_image_names.append(image_name)
++        obj_mesh = trimesh.load(os.path.join(object_dir, f"{image_name}_object_mesh_grasp.obj"))    # Load object mesh
++        mano_params = np.load(os.path.join(hand_params_dir, f"{image_name}_mano_data.npy"), allow_pickle=True).item()
++        mano_params = mano_params['person_0']
++        # pdb.set_trace()
++        # Initialize the HandObject class with the given mano parameters and object mesh.
++        # Note that pose must be represented using the 15-dimensional PCA space
++        ho_pred = HandObject()
++        ho_pred.load_from_mano_params(hand_beta=mano_params['betas'], hand_pose=mano_params['mano_params'], hand_trans=mano_params['cam_t'], obj_faces=obj_mesh.faces, obj_verts=obj_mesh.vertices)
+ 
+-    # To make the dataloader happy, we need a "ground truth" H/O set.
+-    # However, since this isn't used for this demo, just copy the ho_pred object.
+-    ho_gt = HandObject()
+-    ho_gt.load_from_ho(ho_pred)
++        # To make the dataloader happy, we need a "ground truth" H/O set.
++        # However, since this isn't used for this demo, just copy the ho_pred object.
++        ho_gt = HandObject()
++        ho_gt.load_from_ho(ho_pred)
+ 
+-    new_sample = dict()
+-    new_sample['ho_aug'] = ho_pred
+-    new_sample['ho_gt'] = ho_gt
++        new_sample = dict()
++        new_sample['ho_aug'] = ho_pred
++        new_sample['ho_gt'] = ho_gt
++        # pdb.set_trace()
++        # Select the random object vertices which will be sampled
++        new_sample['obj_sampled_idx'] = np.random.randint(0, len(ho_gt.obj_verts), util.SAMPLE_VERTS_NUM)
+ 
+-    # Select the random object vertices which will be sampled
+-    new_sample['obj_sampled_idx'] = np.random.randint(0, len(ho_gt.obj_verts), util.SAMPLE_VERTS_NUM)
++        # Calculate hand and object features. The network uses these for improved performance.
++        new_sample['hand_feats_aug'], new_sample['obj_feats_aug'] = ho_pred.generate_pointnet_features(new_sample['obj_sampled_idx'])
+ 
+-    # Calculate hand and object features. The network uses these for improved performance.
+-    new_sample['hand_feats_aug'], new_sample['obj_feats_aug'] = ho_pred.generate_pointnet_features(new_sample['obj_sampled_idx'])
+-
+-    return [new_sample]     # Return a dataset of length 1
++        dataset.append(new_sample)
++        print(f"Added {image_name} to dataset")
++    return dataset, exist_image_names
+ 
+ 
+ if __name__ == '__main__':
+-    dataset = create_demo_dataset()
+-    args = arguments.run_contactopt_parse_args()
+-
+-    defaults = {'lr': 0.01,
+-                'n_iter': 250,
+-                'w_cont_hand': 2.5,
+-                'sharpen_thresh': -1,
+-                'ncomps': 15,
+-                'w_cont_asym': 2,
+-                'w_opt_trans': 0.3,
+-                'w_opt_rot': 1,
+-                'w_opt_pose': 1.0,
+-                'caps_rad': 0.001,
+-                'cont_method': 0,
+-                'caps_top': 0.0005,
+-                'caps_bot': -0.001,
+-                'w_pen_cost': 320,
+-                'pen_it': 0,
+-                'rand_re': 8,
+-                'rand_re_trans': 0.02,
+-                'rand_re_rot': 5,
+-                'w_obj_rot': 0,
+-                'vis_method': 1}
+-
+-    for k in defaults.keys():
+-        if vars(args)[k] is None:
+-            vars(args)[k] = defaults[k]
++    # Parse command-line arguments for objects
++    parser = argparse.ArgumentParser(description='ContactOpt user demo arguments', add_help=False)
++    parser.add_argument('--objects', nargs='+', default=['burger_box'],
++                        help='List of object names to process')
++    retarget_args, remaining_args = parser.parse_known_args()
++    
++    # Temporarily modify sys.argv to remove --objects for run_contactopt_parse_args
++    original_argv = sys.argv[:]
++    sys.argv = [sys.argv[0]] + remaining_args
++    
++    # "bottle_lift0", "bottle_lift1", "bottle_lift2", "bottle_lift3", "bottle_lift4", "bottle_lift5", "bottle_lift6", "bottle_lift7", "bottle_lift8", "bottle_lift9", "bottle_lift10", "bottle_lift11", "bottle_lift12"
++    objects = retarget_args.objects if isinstance(retarget_args.objects, list) else [retarget_args.objects]
++    for object_name in objects:
++        rgb_dir = os.path.join("<data_root>", object_name, "rgb")
++        image_names = [os.path.basename(rgb_file).replace(".png", "") for rgb_file in sorted(glob.glob(os.path.join(rgb_dir, "*.png")))]
++        dataset, exist_image_names = create_demo_dataset(object_name, image_names)
++        args = arguments.run_contactopt_parse_args()
++        defaults = {'lr': 0.01,
++                    'n_iter': 250,
++                    'w_cont_hand': 2.5,
++                    'sharpen_thresh': -1,
++                    'ncomps': 15,
++                    'w_cont_asym': 2,
++                    'w_opt_trans': 0.3,
++                    'w_opt_rot': 1,
++                    'w_opt_pose': 1.0,
++                    'caps_rad': 0.001,
++                    'cont_method': 0,
++                    'caps_top': 0.0005,
++                    'caps_bot': -0.001,
++                    'w_pen_cost': 320,
++                    'pen_it': 0,
++                    'rand_re': 8,
++                    'rand_re_trans': 0.02,
++                    'rand_re_rot': 5,
++                    'w_obj_rot': 0,
++                    'vis_method': 1}
+ 
+-    args.test_dataset = dataset
+-    args.split = 'user'
++        for k in defaults.keys():
++            if vars(args)[k] is None:
++                vars(args)[k] = defaults[k]
+ 
+-    run_contactopt(args)
++        args.test_dataset = dataset
++        args.split = 'user'
++        args.object_name = object_name
++        args.image_names = exist_image_names
++        run_contactopt(args)
++    
++    # Restore original sys.argv
++    sys.argv = original_argv
+diff --git a/contactopt/util.py b/contactopt/util.py
+index b02ba7a..c32b6a2 100644
+--- a/contactopt/util.py
++++ b/contactopt/util.py
+@@ -369,7 +369,7 @@ def get_mano_closed_faces():
+     which looks much better.
+     https://github.com/hassony2/handobjectconsist/blob/master/meshreg/models/manoutils.py"""
+     mano_layer = manolayer.ManoLayer(
+-        joint_rot_mode="axisang", use_pca=False, mano_root='mano/models', center_idx=None, flat_hand_mean=True
++        joint_rot_mode="axisang", use_pca=False, mano_root='<repo>/assets/mano/models', center_idx=None, flat_hand_mean=True
+     )
+     close_faces = torch.Tensor(
+         [
+@@ -416,7 +416,16 @@ def text_3d(text, pos, direction=None, degree=-90.0, density=10, font='/usr/shar
+ 
+     # font_obj = ImageFont.truetype(font, font_size)
+     font_obj = ImageFont.truetype(font, font_size * density)
+-    font_dim = font_obj.getsize(text)
++    # Handle both old and new Pillow versions
++    try:
++        # New Pillow 10.0.0+ API - use ImageDraw.textbbox()
++        temp_img = Image.new('RGB', (1, 1))
++        temp_draw = ImageDraw.Draw(temp_img)
++        bbox = temp_draw.textbbox((0, 0), text, font=font_obj)
++        font_dim = (bbox[2] - bbox[0], bbox[3] - bbox[1])
++    except (AttributeError, TypeError):
++        # Old Pillow API
++        font_dim = font_obj.getsize(text)
+ 
+     img = Image.new('RGB', font_dim, color=(255, 255, 255))
+     draw = ImageDraw.Draw(img)

@@ -1,0 +1,1146 @@
+diff --git a/assets/teaser.jpg b/assets/teaser.jpg
+deleted file mode 100644
+index c6f3045..0000000
+Binary files a/assets/teaser.jpg and /dev/null differ
+diff --git a/demo.py b/demo.py
+index d8a4141..ce2ba7f 100644
+--- a/demo.py
++++ b/demo.py
+@@ -4,7 +4,8 @@ import argparse
+ import os
+ import cv2
+ import numpy as np
+-
++import pdb
++import trimesh
+ from hamer.configs import CACHE_DIR_HAMER
+ from hamer.models import HAMER, download_models, load_hamer, DEFAULT_CHECKPOINT
+ from hamer.utils import recursive_to
+@@ -26,7 +27,7 @@ def main():
+     parser.add_argument('--side_view', dest='side_view', action='store_true', default=False, help='If set, render side view also')
+     parser.add_argument('--full_frame', dest='full_frame', action='store_true', default=True, help='If set, render all people together also')
+     parser.add_argument('--save_mesh', dest='save_mesh', action='store_true', default=False, help='If set, save meshes to disk also')
+-    parser.add_argument('--batch_size', type=int, default=1, help='Batch size for inference/fitting')
++    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for inference/fitting')
+     parser.add_argument('--rescale_factor', type=float, default=2.0, help='Factor for padding the bbox')
+     parser.add_argument('--body_detector', type=str, default='vitdet', choices=['vitdet', 'regnety'], help='Using regnety improves runtime and reduces memory')
+     parser.add_argument('--file_type', nargs='+', default=['*.jpg', '*.png'], help='List of file extensions to consider')
+@@ -72,10 +73,15 @@ def main():
+ 
+     # Get all demo images ends with .jpg or .png
+     img_paths = [img for end in args.file_type for img in Path(args.img_folder).glob(end)]
+-
++    img_paths = sorted(img_paths)
+     # Iterate over all images in folder
+     for img_path in img_paths:
+         img_cv2 = cv2.imread(str(img_path))
++        img_fn, _ = os.path.splitext(os.path.basename(img_path))
++        # get the depth image in the same folder
++        depth_path = os.path.join(os.path.dirname(os.path.dirname(img_path)), 'depth', f'{img_fn}.png')
++        depth_img = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
++        depth_img = depth_img.astype(np.float32) / 1000
+ 
+         # Detect humans in image
+         det_out = detector(img_cv2)
+@@ -101,35 +107,62 @@ def main():
+             right_hand_keyp = vitposes['keypoints'][-21:]
+ 
+             # Rejecting not confident detections
+-            keyp = left_hand_keyp
+-            valid = keyp[:,2] > 0.5
+-            if sum(valid) > 3:
+-                bbox = [keyp[valid,0].min(), keyp[valid,1].min(), keyp[valid,0].max(), keyp[valid,1].max()]
+-                bboxes.append(bbox)
+-                is_right.append(0)
++            # keyp = left_hand_keyp
++            # valid = keyp[:,2] > 0.5
++            # if sum(valid) > 3:
++            #     bbox = [keyp[valid,0].min(), keyp[valid,1].min(), keyp[valid,0].max(), keyp[valid,1].max()]
++            #     bboxes.append(bbox)
++            #     is_right.append(0)
+             keyp = right_hand_keyp
+             valid = keyp[:,2] > 0.5
+             if sum(valid) > 3:
+                 bbox = [keyp[valid,0].min(), keyp[valid,1].min(), keyp[valid,0].max(), keyp[valid,1].max()]
+                 bboxes.append(bbox)
+                 is_right.append(1)
+-
+         if len(bboxes) == 0:
+             continue
+ 
++        # Visualize predicted 2D keypoints within their corresponding bounding boxes
++        img_vis = img_cv2.copy()
++        
++        # Iterate through all ViTPose outputs and check if keypoints fall within any bounding box
++        bboxes_keypoints_depth = [[] for _ in range(len(bboxes))]
++        for _, vitposes in enumerate(vitposes_out):
++            right_hand_keyp = vitposes['keypoints'][-21:]
++            # Check each keypoint against all bounding boxes
++            for kpt_idx in range(right_hand_keyp.shape[0]):
++                x, y, conf = right_hand_keyp[kpt_idx]
++                if conf > 0.5:  # Only draw confident keypoints
++                    x, y = int(x), int(y)
++                    # Check if keypoint is within any bounding box
++                    for i, bbox in enumerate(bboxes):
++                        x1, y1, x2, y2 = bbox
++                        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
++                        if x1 <= x <= x2 and y1 <= y <= y2:
++                            bboxes_keypoints_depth[i].append( depth_img[y, x])
++                            # print(f"x {x}, y {y}, depth {depth_img[y, x]}")
++                            break  # Found a matching bounding box, no need to check others
++        
+         boxes = np.stack(bboxes)
++        bboxes_depth = []
++        for keyp_depth in bboxes_keypoints_depth:
++            # print(f"keyp_depth {keyp_depth}")
++            bboxes_depth.append(np.mean(keyp_depth))
++        bboxes_depth = np.array(bboxes_depth)
+         right = np.stack(is_right)
+ 
+         # Run reconstruction on all detected hands
+-        dataset = ViTDetDataset(model_cfg, img_cv2, boxes, right, rescale_factor=args.rescale_factor)
++        dataset = ViTDetDataset(model_cfg, img_cv2, boxes, bboxes_depth, right, rescale_factor=args.rescale_factor)
+         dataloader = torch.utils.data.DataLoader(dataset, batch_size=8, shuffle=False, num_workers=0)
+ 
+         all_verts = []
+         all_cam_t = []
+         all_right = []
+-        
++
+         for batch in dataloader:
+             batch = recursive_to(batch, device)
++            batch_size = batch['img'].shape[0]
++            # pdb.set_trace()
+             with torch.no_grad():
+                 out = model(batch)
+ 
+@@ -140,9 +173,15 @@ def main():
+             box_size = batch["box_size"].float()
+             img_size = batch["img_size"].float()
+             multiplier = (2*batch['right']-1)
+-            scaled_focal_length = model_cfg.EXTRA.FOCAL_LENGTH / model_cfg.MODEL.IMAGE_SIZE * img_size.max()
+-            pred_cam_t_full = cam_crop_to_full(pred_cam, box_center, box_size, img_size, scaled_focal_length).detach().cpu().numpy()
+ 
++            # K_path = "<data_root>/cloth/cam_K.txt"
++            # K = np.loadtxt(K_path)
++
++            scaled_focal_length = 957 #model_cfg.EXTRA.FOCAL_LENGTH / model_cfg.MODEL.IMAGE_SIZE * img_size.max()
++            # pdb.set_trace()
++            pred_cam_t_full, scale_factor = cam_crop_to_full(pred_cam, box_center, box_size, img_size, batch['bboxes_depth'], scaled_focal_length)
++            pred_cam_t_full = pred_cam_t_full.detach().cpu().numpy()
++            scale_factor = scale_factor.detach().cpu().numpy()
+             # Render the result
+             batch_size = batch['img'].shape[0]
+             for n in range(batch_size):
+@@ -172,8 +211,8 @@ def main():
+                     final_img = np.concatenate([input_patch, regression_img], axis=1)
+ 
+                 cv2.imwrite(os.path.join(args.out_folder, f'{img_fn}_{person_id}.png'), 255*final_img[:, :, ::-1])
+-
+-                # Add all verts and cams to list
++                #pdb.set_trace()
++                # Add all verts and cams to listcam_t
+                 verts = out['pred_vertices'][n].detach().cpu().numpy()
+                 is_right = batch['right'][n].cpu().numpy()
+                 verts[:,0] = (2*is_right-1)*verts[:,0]
+@@ -181,28 +220,54 @@ def main():
+                 all_verts.append(verts)
+                 all_cam_t.append(cam_t)
+                 all_right.append(is_right)
+-
++                # pdb.set_trace()
+                 # Save all meshes to disk
+-                if args.save_mesh:
++                if args.save_mesh and is_right:
+                     camera_translation = cam_t.copy()
+                     tmesh = renderer.vertices_to_trimesh(verts, camera_translation, LIGHT_BLUE, is_right=is_right)
+-                    tmesh.export(os.path.join(args.out_folder, f'{img_fn}_{person_id}.obj'))
++                    # tmesh  = trimesh.Trimesh(vertices=verts, faces=renderer.faces)
++                    # pdb.set_trace()
++                    hand_label = 'right' if is_right else 'left'
++                    # tmesh.export(os.path.join(args.out_folder, f'{img_fn}_{hand_label}_{person_id}.obj'))
+ 
+         # Render front view
+         if args.full_frame and len(all_verts) > 0:
++            print(f"args.out_folder {args.out_folder}, img_fn {img_fn}")
+             misc_args = dict(
+                 mesh_base_color=LIGHT_BLUE,
+                 scene_bg_color=(1, 1, 1),
+                 focal_length=scaled_focal_length,
++                img_fn = img_fn,
++                out_folder = args.out_folder,
++                img_cv2 = img_cv2,
++                scale_factor = scale_factor,
+             )
+             cam_view = renderer.render_rgba_multiple(all_verts, cam_t=all_cam_t, render_res=img_size[n], is_right=all_right, **misc_args)
+-
++            cv2.imwrite(os.path.join(args.out_folder, f'{img_fn}_all.jpg'), cam_view[:, :, ::-1])
++            pdb.set_trace()
++            # save cam_view to file
++            #np.save(os.path.join(args.out_folder, f'{img_fn}_cam_view.npy'), cam_view)
+             # Overlay image
+             input_img = img_cv2.astype(np.float32)[:,:,::-1]/255.0
+             input_img = np.concatenate([input_img, np.ones_like(input_img[:,:,:1])], axis=2) # Add alpha channel
+             input_img_overlay = input_img[:,:,:3] * (1-cam_view[:,:,3:]) + cam_view[:,:,:3] * cam_view[:,:,3:]
+-
++            # pdb.set_trace()
+             cv2.imwrite(os.path.join(args.out_folder, f'{img_fn}_all.jpg'), 255*input_img_overlay[:, :, ::-1])
+-
++            #pdb.set_trace()
++            # save the out['manotorch_params'].cpu(), out['betas'].cpu() info in npy
++            mano_params = out['manotorch_params'].cpu().numpy()
++            betas = out['betas'].cpu().numpy()
++            # put on a dict and save
++            mano_data = {}
++            for i in range(out['manotorch_params'].shape[0]):
++                person_id = int(batch['personid'][i])
++                mano_data[f'person_{person_id}'] = {
++                    'mano_params': mano_params[i],
++                    'betas': betas[i],
++                    'cam_t': all_cam_t[i],
++                }
++            # Save the complete dictionary
++            np.save(os.path.join(args.out_folder, f'{img_fn}_mano_data.npy'), mano_data)
++            
+ if __name__ == '__main__':
+     main()
+diff --git a/hamer/datasets/vitdet_dataset.py b/hamer/datasets/vitdet_dataset.py
+index eb84053..58fd5bd 100644
+--- a/hamer/datasets/vitdet_dataset.py
++++ b/hamer/datasets/vitdet_dataset.py
+@@ -19,6 +19,7 @@ class ViTDetDataset(torch.utils.data.Dataset):
+                  cfg: CfgNode,
+                  img_cv2: np.array,
+                  boxes: np.array,
++                 bboxes_depth: np.array,
+                  right: np.array,
+                  rescale_factor=2.5,
+                  train: bool = False,
+@@ -40,6 +41,7 @@ class ViTDetDataset(torch.utils.data.Dataset):
+         self.scale = rescale_factor * (boxes[:, 2:4] - boxes[:, 0:2]) / 200.0
+         self.personid = np.arange(len(boxes), dtype=np.int32)
+         self.right = right.astype(np.float32)
++        self.bboxes_depth = bboxes_depth.astype(np.float32)
+ 
+     def __len__(self) -> int:
+         return len(self.personid)
+@@ -90,6 +92,7 @@ class ViTDetDataset(torch.utils.data.Dataset):
+         }
+         item['box_center'] = self.center[idx].copy()
+         item['box_size'] = bbox_size
++        item['bboxes_depth'] = self.bboxes_depth[idx].copy()
+         item['img_size'] = 1.0 * np.array([cvimg.shape[1], cvimg.shape[0]])
+         item['right'] = self.right[idx].copy()
+         return item
+diff --git a/hamer/models/__init__.py b/hamer/models/__init__.py
+index 7261b0a..62cb165 100644
+--- a/hamer/models/__init__.py
++++ b/hamer/models/__init__.py
+@@ -4,7 +4,7 @@ from .discriminator import Discriminator
+ 
+ from ..utils.download import cache_url
+ from ..configs import CACHE_DIR_HAMER
+-
++import pdb
+ 
+ def download_models(folder=CACHE_DIR_HAMER):
+     """Download checkpoints and files for running inference.
+@@ -29,11 +29,17 @@ def download_models(folder=CACHE_DIR_HAMER):
+                 os.system("tar -xvf " + output_path)
+ 
+ DEFAULT_CHECKPOINT=f'{CACHE_DIR_HAMER}/hamer_ckpts/checkpoints/hamer.ckpt'
+-def load_hamer(checkpoint_path=DEFAULT_CHECKPOINT):
++def load_hamer(checkpoint_path=DEFAULT_CHECKPOINT, estimated_focal_length=None):
+     from pathlib import Path
+     from ..configs import get_config
+     model_cfg = str(Path(checkpoint_path).parent.parent / 'model_config.yaml')
+     model_cfg = get_config(model_cfg, update_cachedir=True)
++    
++    # Make config mutable to set focal length
++    if estimated_focal_length is not None:
++        model_cfg.defrost()
++        model_cfg.EXTRA.FOCAL_LENGTH = estimated_focal_length
++        model_cfg.freeze()
+ 
+     # Override some config values, to crop bbox correctly
+     if (model_cfg.MODEL.BACKBONE.TYPE == 'vit') and ('BBOX_SHAPE' not in model_cfg.MODEL):
+diff --git a/hamer/models/hamer.py b/hamer/models/hamer.py
+index 8a79e4d..c5b6f03 100644
+--- a/hamer/models/hamer.py
++++ b/hamer/models/hamer.py
+@@ -1,6 +1,7 @@
+ import torch
+ import pytorch_lightning as pl
+ from typing import Any, Dict, Mapping, Tuple
++import numpy as np
+ 
+ from yacs.config import CfgNode
+ 
+@@ -12,7 +13,7 @@ from .heads import build_mano_head
+ from .discriminator import Discriminator
+ from .losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
+ from . import MANO
+-
++import pdb 
+ log = get_pylogger(__name__)
+ 
+ class HAMER(pl.LightningModule):
+@@ -51,6 +52,12 @@ class HAMER(pl.LightningModule):
+         mano_cfg = {k.lower(): v for k,v in dict(cfg.MANO).items()}
+         self.mano = MANO(**mano_cfg)
+ 
++        # Load MANO data for PCA conversion
++        import pickle
++        mano_data = pickle.load(open('_DATA/data/mano/MANO_RIGHT.pkl', 'rb'), encoding='latin1')
++        self.register_buffer('hands_mean', torch.tensor(mano_data['hands_mean'], dtype=torch.float32))
++        self.register_buffer('hands_components', torch.tensor(mano_data['hands_components'], dtype=torch.float32))
++
+         # Buffer that shows whetheer we need to initialize ActNorm layers
+         self.register_buffer('initialized', torch.tensor(False))
+         # Setup renderer for visualization
+@@ -64,6 +71,254 @@ class HAMER(pl.LightningModule):
+         # Disable automatic optimization since we use adversarial training
+         self.automatic_optimization = False
+ 
++    def rotation_matrix_to_axis_angle(self, rotation_matrix):
++        """
++        Convert 3x3 rotation matrix to axis-angle representation.
++        
++        Args:
++            rotation_matrix: 3x3 rotation matrix (torch.Tensor) or batch of matrices (batch_size, 3, 3)
++            
++        Returns:
++            axis_angle: 3-element tensor [rx, ry, rz] representing axis-angle rotation
++        """
++        # Handle batch dimension
++        if rotation_matrix.dim() == 3:
++            batch_size = rotation_matrix.shape[0]
++            axis_angles = []
++            for i in range(batch_size):
++                R = rotation_matrix[i]
++                axis_angle = self._single_rotation_matrix_to_axis_angle(R)
++                axis_angles.append(axis_angle)
++            return torch.stack(axis_angles, dim=0)
++        else:
++            return self._single_rotation_matrix_to_axis_angle(rotation_matrix)
++    
++    def _single_rotation_matrix_to_axis_angle(self, R):
++        """
++        Convert a single 3x3 rotation matrix to axis-angle representation.
++        """
++        # Ensure R is 2D
++        if R.dim() == 3:
++            R = R.squeeze(0)
++        # Extract the rotation angle and axis
++        # Using the formula: angle = arccos((trace(R) - 1) / 2)
++        trace = torch.trace(R)
++        angle = torch.arccos(torch.clamp((trace - 1) / 2, -1, 1))
++        
++        if torch.abs(angle) < 1e-6:
++            # If angle is very small, return zero rotation
++            return torch.zeros(3, device=R.device, dtype=R.dtype)
++        
++        # Extract the rotation axis
++        # Using the formula: axis = (R - R^T) / (2 * sin(angle))
++        skew_symmetric = (R - R.T) / (2 * torch.sin(angle))
++        axis = torch.tensor([skew_symmetric[2, 1], skew_symmetric[0, 2], skew_symmetric[1, 0]], 
++                           device=R.device, dtype=R.dtype)
++        
++        # Return axis-angle representation (axis * angle)
++        return axis * angle
++    
++    def rotation_matrix_to_axis_angle_vectorized(self, rotation_matrix):
++        """
++        Vectorized version of rotation matrix to axis-angle conversion.
++        
++        Args:
++            rotation_matrix: 3x3 rotation matrix (torch.Tensor) or batch of matrices (batch_size, 3, 3)
++            
++        Returns:
++            axis_angle: 3-element tensor [rx, ry, rz] representing axis-angle rotation
++        """
++        # Ensure we have the right shape
++        if rotation_matrix.dim() == 2:
++            rotation_matrix = rotation_matrix.unsqueeze(0)
++        
++        batch_size = rotation_matrix.shape[0]
++        
++        # Extract the rotation angle and axis for all matrices at once
++        # Using the formula: angle = arccos((trace(R) - 1) / 2)
++        trace = torch.diagonal(rotation_matrix, dim1=-2, dim2=-1).sum(dim=-1)
++        angle = torch.arccos(torch.clamp((trace - 1) / 2, -1, 1))
++        
++        # Handle small angles
++        small_angle_mask = torch.abs(angle) < 1e-6
++        angle = torch.where(small_angle_mask, torch.zeros_like(angle), angle)
++        
++        # Extract the rotation axis
++        # Using the formula: axis = (R - R^T) / (2 * sin(angle))
++        R_transpose = rotation_matrix.transpose(-2, -1)
++        skew_symmetric = (rotation_matrix - R_transpose) / (2 * torch.sin(angle).unsqueeze(-1).unsqueeze(-1))
++        
++        # Extract the axis components
++        axis_x = skew_symmetric[:, 2, 1]
++        axis_y = skew_symmetric[:, 0, 2]
++        axis_z = skew_symmetric[:, 1, 0]
++        axis = torch.stack([axis_x, axis_y, axis_z], dim=-1)
++        
++        # Return axis-angle representation (axis * angle)
++        result = axis * angle.unsqueeze(-1)
++        
++        # Handle small angles by setting to zero
++        result = torch.where(small_angle_mask.unsqueeze(-1), torch.zeros_like(result), result)
++        
++        return result.squeeze(0) if batch_size == 1 else result
++
++    def convert_mano_to_manotorch_params(self, pred_mano_params):
++        """
++        Convert MANO parameters from rotation matrices to PCA-based axis-angle representation for manotorch.
++        
++        Args:
++            pred_mano_params: Dictionary containing 'global_orient' and 'hand_pose' as 3x3 rotation matrices
++            
++        Returns:
++            Tensor of manotorch parameters:
++            - 3 values for global axis-angle rotation
++            - 15 pose parameters (using PCA components)
++        """
++        batch_size = pred_mano_params['hand_pose'].shape[0]
++        
++        # Initialize output tensor
++        manotorch_params = torch.zeros(batch_size, 18, device=pred_mano_params['hand_pose'].device, dtype=pred_mano_params['hand_pose'].dtype)
++        
++        # Process each batch element separately
++        for i in range(batch_size):
++            # Convert global orientation for this batch element
++            global_orient_matrix = pred_mano_params['global_orient'][i]  # Shape: (3, 3)
++            global_axis_angle = self._single_rotation_matrix_to_axis_angle(global_orient_matrix)
++            
++            # Convert hand pose for this batch element
++            hand_pose_matrices = pred_mano_params['hand_pose'][i]  # Shape: (15, 3, 3)
++            
++            # Convert each joint rotation matrix to axis-angle
++            hand_pose_aa_list = []
++            for joint_idx in range(15):
++                joint_matrix = hand_pose_matrices[joint_idx]  # Shape: (3, 3)
++                joint_axis_angle = self._single_rotation_matrix_to_axis_angle(joint_matrix)
++                hand_pose_aa_list.append(joint_axis_angle)
++            
++            # Stack all joint axis-angles: Shape: (45,)
++            hand_pose_aa = torch.cat(hand_pose_aa_list, dim=0)  # Shape: (45,)
++            
++            # Subtract the hands mean pose
++            hand_pose_aa_centered = hand_pose_aa - self.hands_mean
++            
++            # Convert to PCA coefficients: hand_pose_pca = np.dot(hand_pose_aa, hand_components.T)
++            hand_pose_pca = torch.matmul(hand_pose_aa_centered, self.hands_components.T)
++            # pdb.set_trace()
++            # Take the first 15 PCA components for manotorch
++            hand_pose_params = hand_pose_pca[:15]  # Shape: (15,)
++            
++            # Combine global orientation and hand pose for this batch element
++            manotorch_params[i] = torch.cat([global_axis_angle, hand_pose_params], dim=0)
++        
++        return manotorch_params
++    
++    def convert_manotorch_to_mano_params(self, manotorch_params):
++        """
++        Convert manotorch parameters back to MANO format.
++        
++        Args:
++            manotorch_params: Tensor of shape (batch_size, 18) containing:
++                - First 3 values: global axis-angle rotation
++                - Next 15 values: PCA coefficients for hand pose
++                
++        Returns:
++            Dictionary with MANO parameters in rotation matrix format
++        """
++        batch_size = manotorch_params.shape[0]
++        
++        # Initialize output tensors
++        global_rotmat = torch.zeros(batch_size, 3, 3, device=manotorch_params.device, dtype=manotorch_params.dtype)
++        hand_pose_rotmat = torch.zeros(batch_size, 15, 3, 3, device=manotorch_params.device, dtype=manotorch_params.dtype)
++        
++        # Process each batch element separately
++        for i in range(batch_size):
++            # Extract global orientation and hand pose PCA coefficients for this batch element
++            global_axis_angle = manotorch_params[i, :3]  # Shape: (3,)
++            hand_pose_pca = manotorch_params[i, 3:18]   # Shape: (15,)
++            
++            # Convert PCA coefficients back to axis-angle: hand_pose_aa = np.dot(hand_pose_pca, hand_components)
++            # First, pad with zeros to get full 45-dimensional vector
++            hand_pose_pca_full = torch.zeros(45, device=manotorch_params.device, dtype=manotorch_params.dtype)
++            hand_pose_pca_full[:15] = hand_pose_pca
++            # Convert back to axis-angle representation
++            hand_pose_aa = torch.matmul(hand_pose_pca_full, self.hands_components)
++            pdb.set_trace()
++            # Add back the hands mean pose
++            hand_pose_aa = hand_pose_aa + self.hands_mean
++            
++            # Convert axis-angle to rotation matrices
++            from ..utils.geometry import aa_to_rotmat
++            
++            # Convert global orientation
++            # pdb.set_trace()
++            global_rotmat[i] = aa_to_rotmat(global_axis_angle.unsqueeze(0)).squeeze(0)  # Shape: (3, 3)
++            
++            # Convert hand pose (reshape to 15 joints)
++            hand_pose_aa_reshaped = hand_pose_aa.view(15, 3)  # Shape: (15, 3)
++            hand_pose_rotmat[i] = aa_to_rotmat(hand_pose_aa_reshaped).view(15, 3, 3)  # Shape: (15, 3, 3)
++            pdb.set_trace()
++        
++        return {
++            'global_orient': global_rotmat,
++            'hand_pose': hand_pose_rotmat
++        }
++
++    def convert_mano_to_hand_pose_and_joints(self, pred_mano_params):
++        """
++        Convert MANO parameters to hand pose (48,) and hand joints (21, 3).
++        
++        Args:
++            pred_mano_params: Dictionary containing 'global_orient', 'hand_pose', and 'transl' as rotation matrices
++            
++        Returns:
++            Tuple of (hand_pose, hand_joints):
++            - hand_pose: Tensor of shape (batch_size, 48) containing:
++                - First 45 values: concatenated axis-angle rotations (global_orient + hand_pose)
++                - Last 3 values: translation
++            - hand_joints: Tensor of shape (batch_size, 21, 3) containing 3D joint positions
++        """
++        batch_size = pred_mano_params['hand_pose'].shape[0]
++        
++        # Initialize output tensors
++        hand_pose = torch.zeros(batch_size, 48, device=pred_mano_params['hand_pose'].device, dtype=pred_mano_params['hand_pose'].dtype)
++        hand_joints = torch.zeros(batch_size, 21, 3, device=pred_mano_params['hand_pose'].device, dtype=pred_mano_params['hand_pose'].dtype)
++        
++        # Process each batch element separately
++        for i in range(batch_size):
++            # Convert global orientation for this batch element
++            global_orient_matrix = pred_mano_params['global_orient'][i]  # Shape: (3, 3)
++            global_axis_angle = self._single_rotation_matrix_to_axis_angle(global_orient_matrix)
++            
++            # Convert hand pose for this batch element
++            hand_pose_matrices = pred_mano_params['hand_pose'][i]  # Shape: (15, 3, 3)
++            
++            # Convert each joint rotation matrix to axis-angle
++            hand_pose_aa_list = []
++            for joint_idx in range(15):
++                joint_matrix = hand_pose_matrices[joint_idx]  # Shape: (3, 3)
++                joint_axis_angle = self._single_rotation_matrix_to_axis_angle(joint_matrix)
++                hand_pose_aa_list.append(joint_axis_angle)
++            
++            # Stack all joint axis-angles: Shape: (45,)
++            hand_pose_aa = torch.cat(hand_pose_aa_list, dim=0)  # Shape: (45,)
++
++            # Get hand joints using MANO forward pass
++            mano_input = {
++                'global_orient': pred_mano_params['global_orient'][i:i+1],  # Shape: (1, 3, 3)
++                'hand_pose': pred_mano_params['hand_pose'][i:i+1],          # Shape: (1, 15, 3, 3)
++                'betas': pred_mano_params['betas'][i:i+1],
++                'transl': pred_mano_params['transl'][i:i+1],
++            }
++            # pdb.set_trace()
++            # Forward pass through MANO to get joints
++            mano_output = self.mano(**{k: v.float() for k, v in mano_input.items()}, pose2rot=False)
++            hand_joints[i] = mano_output.joints.squeeze(0)  # Shape: (21, 3)
++            # Combine global orientation, hand pose, and translation: Shape: (48,)
++            hand_pose[i] = torch.cat([global_axis_angle, hand_pose_aa], dim=0)
++            # pdb.set_trace()
++        #pdb.set_trace()
++        return hand_pose, hand_joints
++
+     def get_parameters(self):
+         all_params = list(self.mano_head.parameters())
+         all_params += list(self.backbone.parameters())
+@@ -105,7 +360,6 @@ class HAMER(pl.LightningModule):
+         conditioning_feats = self.backbone(x[:,:,:,32:-32])
+ 
+         pred_mano_params, pred_cam, _ = self.mano_head(conditioning_feats)
+-
+         # Store useful regression outputs to the output dict
+         output = {}
+         output['pred_cam'] = pred_cam
+@@ -115,9 +369,13 @@ class HAMER(pl.LightningModule):
+         device = pred_mano_params['hand_pose'].device
+         dtype = pred_mano_params['hand_pose'].dtype
+         focal_length = self.cfg.EXTRA.FOCAL_LENGTH * torch.ones(batch_size, 2, device=device, dtype=dtype)
+-        pred_cam_t = torch.stack([pred_cam[:, 1],
+-                                  pred_cam[:, 2],
+-                                  2*focal_length[:, 0]/(self.cfg.MODEL.IMAGE_SIZE * pred_cam[:, 0] +1e-9)],dim=-1)
++        # pred_cam_t = torch.stack([pred_cam[:, 1],
++        #                           pred_cam[:, 2],
++        #                           2*focal_length[:, 0]/(self.cfg.MODEL.IMAGE_SIZE * pred_cam[:, 0] +1e-9)],dim=-1)
++        
++        pred_cam_t = torch.stack([pred_cam[:, 1], 
++                                pred_cam[:, 2], 
++                                batch['bboxes_depth']],dim=-1)
+         output['pred_cam_t'] = pred_cam_t
+         output['focal_length'] = focal_length
+ 
+@@ -125,6 +383,26 @@ class HAMER(pl.LightningModule):
+         pred_mano_params['global_orient'] = pred_mano_params['global_orient'].reshape(batch_size, -1, 3, 3)
+         pred_mano_params['hand_pose'] = pred_mano_params['hand_pose'].reshape(batch_size, -1, 3, 3)
+         pred_mano_params['betas'] = pred_mano_params['betas'].reshape(batch_size, -1)
++        
++        # Convert MANO parameters to manotorch format
++        manotorch_params = self.convert_mano_to_manotorch_params(pred_mano_params)
++        output['manotorch_params'] = manotorch_params
++        output['betas'] = pred_mano_params['betas'].reshape(batch_size, -1)
++
++
++        # # self.convert_mano_to_hand_pose_and_joints(pred_mano_params)
++        # # Convert manotorch parameters to mano format
++        # our_pred_mano_params = self.convert_manotorch_to_mano_params(manotorch_params)
++        # try:    
++        #     assert torch.allclose(pred_mano_params['global_orient'], our_pred_mano_params['global_orient'].unsqueeze(1), atol=1e-3)
++        #     assert torch.allclose(pred_mano_params['hand_pose'], our_pred_mano_params['hand_pose'], atol=1e-3)
++        # except Exception as e:
++        #     pdb.set_trace()
++        #     raise e
++        # pdb.set_trace()
++
++
++
+         mano_output = self.mano(**{k: v.float() for k,v in pred_mano_params.items()}, pose2rot=False)
+         pred_keypoints_3d = mano_output.joints
+         pred_vertices = mano_output.vertices
+@@ -132,12 +410,13 @@ class HAMER(pl.LightningModule):
+         output['pred_vertices'] = pred_vertices.reshape(batch_size, -1, 3)
+         pred_cam_t = pred_cam_t.reshape(-1, 3)
+         focal_length = focal_length.reshape(-1, 2)
++        # pdb.set_trace()
+         pred_keypoints_2d = perspective_projection(pred_keypoints_3d,
+                                                    translation=pred_cam_t,
+                                                    focal_length=focal_length / self.cfg.MODEL.IMAGE_SIZE)
+ 
+         output['pred_keypoints_2d'] = pred_keypoints_2d.reshape(batch_size, -1, 2)
+-        return output
++        return output, pred_mano_params
+ 
+     def compute_loss(self, batch: Dict, output: Dict, train: bool = True) -> torch.Tensor:
+         """
+diff --git a/hamer/models/heads/mano_head.py b/hamer/models/heads/mano_head.py
+index c584873..996f5e7 100644
+--- a/hamer/models/heads/mano_head.py
++++ b/hamer/models/heads/mano_head.py
+@@ -3,7 +3,7 @@ import torch.nn as nn
+ import torch.nn.functional as F
+ import numpy as np
+ import einops
+-
++import pdb
+ from ...utils.geometry import rot6d_to_rotmat, aa_to_rotmat
+ from ..components.pose_transformer import TransformerDecoder
+ 
+diff --git a/hamer/utils/geometry.py b/hamer/utils/geometry.py
+index 7929ef5..77165df 100644
+--- a/hamer/utils/geometry.py
++++ b/hamer/utils/geometry.py
+@@ -1,6 +1,7 @@
+ from typing import Optional
+ import torch
+ from torch.nn import functional as F
++import pdb 
+ 
+ def aa_to_rotmat(theta: torch.Tensor):
+     """
+@@ -88,7 +89,7 @@ def perspective_projection(points: torch.Tensor,
+     K[:,1,1] = focal_length[:,1]
+     K[:,2,2] = 1.
+     K[:,:-1, -1] = camera_center
+-
++    # pdb.set_trace()
+     # Transform points
+     points = torch.einsum('bij,bkj->bki', rotation, points)
+     points = points + translation.unsqueeze(1)
+diff --git a/hamer/utils/renderer.py b/hamer/utils/renderer.py
+index 0e161bb..9dfa88e 100644
+--- a/hamer/utils/renderer.py
++++ b/hamer/utils/renderer.py
+@@ -1,4 +1,5 @@
+ import os
++from turtle import right
+ if 'PYOPENGL_PLATFORM' not in os.environ:
+     os.environ['PYOPENGL_PLATFORM'] = 'egl'
+ import torch
+@@ -8,18 +9,76 @@ import trimesh
+ import cv2
+ from yacs.config import CfgNode
+ from typing import List, Optional
++import pdb
+ 
+-def cam_crop_to_full(cam_bbox, box_center, box_size, img_size, focal_length=5000.):
++
++def cam_crop_to_full(cam_bbox, box_center, box_size, img_size, estimated_depth, focal_length=5000.):
+     # Convert cam_bbox to full image
+     img_w, img_h = img_size[:, 0], img_size[:, 1]
+     cx, cy, b = box_center[:, 0], box_center[:, 1], box_size
+     w_2, h_2 = img_w / 2., img_h / 2.
++
+     bs = b * cam_bbox[:, 0] + 1e-9
+-    tz = 2 * focal_length / bs
+-    tx = (2 * (cx - w_2) / bs) + cam_bbox[:, 1]
+-    ty = (2 * (cy - h_2) / bs) + cam_bbox[:, 2]
++    
++    # Calculate original camera parameters that give correct 2D projection
++    original_tz = 2 * focal_length / bs
++    tx_original = (2 * (cx - w_2) / bs) + cam_bbox[:, 1]
++    ty_original = (2 * (cy - h_2) / bs) + cam_bbox[:, 2]
++    
++    # Use your estimated depth, which has good 2d projection, but 3d distance is bad sometimes
++    tz = estimated_depth
++
++    # Or use original code, which has worse 2d projection
++    # tz = 2 * focal_length / bs
++    # Calculate the scaling factor needed to  
++    # The key insight: we need to scale the camera translation AND adjust the hand vertices
++    scale_factor = tz / original_tz
++    # Scale camera translation to maintain 2D projection ratios
++    tx = tx_original * scale_factor
++    ty = ty_original * scale_factor
++    # pdb.set_trace()
+     full_cam = torch.stack([tx, ty, tz], dim=-1)
+-    return full_cam
++    # pdb.set_trace()
++    return full_cam, scale_factor
++
++# def cam_crop_to_full(cam_bbox, box_center, box_size, img_size, estimated_depth, focal_length=5000.):
++#     # Convert cam_bbox to full image
++#     img_w, img_h = img_size[:, 0], img_size[:, 1]
++#     cx, cy, b = box_center[:, 0], box_center[:, 1], box_size
++#     w_2, h_2 = img_w / 2., img_h / 2.
++#     K_path = "<data_root>/cloth/cam_K.txt"
++#     K = np.loadtxt(K_path)
++#     px = K[0,2] - w_2 # its just zero
++#     py = K[1,2] - h_2
++#     # px = 0
++#     # py = 0
++#     bs = b * cam_bbox[:, 0] + 1e-9
++#     tz = 2 * focal_length / bs # estimated_depth #
++#     # tz = estimated_depth
++#     # bs = 2 * focal_length / tz
++    
++#     tx = (2 * (cx - w_2) / bs ) + cam_bbox[:, 1] #- px /  (bs / 2)
++#     ty = (2 * (cy - h_2) / bs) + cam_bbox[:, 2] # - py /  (bs / 2)
++#     full_cam = torch.stack([tx, ty, tz], dim=-1)
++#     # pdb.set_trace()
++    
++#     # # Save input parameters to npy file
++#     # import os
++#     # import time
++#     # params_dict = {
++#     #     'cam_bbox': cam_bbox.cpu().numpy() if hasattr(cam_bbox, 'cpu') else np.array(cam_bbox),
++#     #     'box_center': box_center.cpu().numpy() if hasattr(box_center, 'cpu') else np.array(box_center),
++#     #     'box_size': box_size.cpu().numpy() if hasattr(box_size, 'cpu') else np.array(box_size),
++#     #     'img_size': img_size.cpu().numpy() if hasattr(img_size, 'cpu') else np.array(img_size),
++#     #     'estimated_depth': estimated_depth.cpu().numpy() if hasattr(estimated_depth, 'cpu') else np.array(estimated_depth),
++#     #     'focal_length': focal_length,
++#     #     'full_cam': full_cam.cpu().numpy() if hasattr(full_cam, 'cpu') else np.array(full_cam),
++#     #     'K': K
++#     # }
++#     # os.makedirs('debug_params', exist_ok=True)
++#     # np.save(f'debug_params/cam_crop_params.npy', params_dict)
++#     # pdb.set_trace()
++#     return full_cam
+ 
+ def get_light_poses(n_lights=5, elevation=np.pi / 3, dist=12):
+     # get lights in a circle around origin at elevation
+@@ -143,7 +202,7 @@ class Renderer:
+             faces (np.array): Array of shape (F, 3) containing the mesh faces.
+         """
+         self.cfg = cfg
+-        self.focal_length = cfg.EXTRA.FOCAL_LENGTH
++        self.focal_length = 957 #cfg.EXTRA.FOCAL_LENGTH
+         self.img_res = cfg.MODEL.IMAGE_SIZE
+ 
+         # add faces that make the hand mesh watertight
+@@ -163,10 +222,125 @@ class Renderer:
+                               [78, 108, 79]])
+         faces = np.concatenate([faces, faces_new], axis=0)
+         
+-        self.camera_center = [self.img_res // 2, self.img_res // 2]
++        self.camera_center = [960, 540] #   [self.img_res // 2, self.img_res // 2]
+         self.faces = faces
+         self.faces_left = self.faces[:,[0,2,1]]
+ 
++    # def __call__(self,
++    #             vertices: np.array,
++    #             camera_translation: np.array,
++    #             image: torch.Tensor,
++    #             full_frame: bool = False,
++    #             imgname: Optional[str] = None,
++    #             side_view=False, rot_angle=90,
++    #             mesh_base_color=(1.0, 1.0, 0.9),
++    #             scene_bg_color=(0,0,0),
++    #             return_rgba=False,
++    #             ) -> np.array:
++    #     """
++    #     Render meshes on input image
++    #     Args:
++    #         vertices (np.array): Array of shape (V, 3) containing the mesh vertices.
++    #         camera_translation (np.array): Array of shape (3,) with the camera translation.
++    #         image (torch.Tensor): Tensor of shape (3, H, W) containing the image crop with normalized pixel values.
++    #         full_frame (bool): If True, then render on the full image.
++    #         imgname (Optional[str]): Contains the original image filenamee. Used only if full_frame == True.
++    #     """
++        
++    #     if full_frame:
++    #         image = cv2.imread(imgname).astype(np.float32)[:, :, ::-1] / 255.
++    #     else:
++    #         image = image.clone() * torch.tensor(self.cfg.MODEL.IMAGE_STD, device=image.device).reshape(3,1,1)
++    #         image = image + torch.tensor(self.cfg.MODEL.IMAGE_MEAN, device=image.device).reshape(3,1,1)
++    #         image = image.permute(1, 2, 0).cpu().numpy()
++
++    #     vertices = vertices + camera_translation
++    #     K_path = "<data_root>/cloth/cam_K.txt"
++    #     K = np.loadtxt(K_path)
++    #     hand_vertices_2d, _ = cv2.projectPoints(
++    #         vertices,
++    #         np.zeros(3),
++    #         np.zeros(3),
++    #         K,
++    #         None
++    #     )
++    #     hand_vertices_2d = hand_vertices_2d.reshape(-1, 2)
++        
++    #     # Convert image to (0, 255) range for OpenCV operations
++    #     image_uint8 = (image * 255).astype(np.uint8)
++        
++    #     # Draw hand mesh vertices on the image
++    #     for vertex in hand_vertices_2d:
++    #         x, y = int(vertex[0]), int(vertex[1])
++    #         if 0 <= x < image_uint8.shape[1] and 0 <= y < image_uint8.shape[0]:
++    #             cv2.circle(image_uint8, (x, y), 2, (255, 0, 0), -1)  # Blue dots for hand vertices
++        
++    #     # Convert back to (0, 1) range
++    #     image = image_uint8.astype(np.float32) / 255.0
++    #     return image
++
++    # def render_rgba_multiple(
++    #         self,
++    #         vertices: List[np.array],
++    #         cam_t: List[np.array],
++    #         rot_axis=[1,0,0],
++    #         rot_angle=0,
++    #         mesh_base_color=(1.0, 1.0, 0.9),
++    #         scene_bg_color=(0,0,0),
++    #         render_res=[256, 256],
++    #         focal_length=None,
++    #         is_right=None,
++    #         img_fn=None,
++    #         out_folder=None,
++    #         img_cv2=None,
++    #         scale_factor=1,
++    #     ):
++    #     img_cv2_copy = img_cv2.copy()
++    #     for i in range(len(vertices)):
++    #         vertices_i = vertices[i] * scale_factor[i] + cam_t[i]
++            
++    #         hand3d_path = f'{out_folder}/{img_fn}_right_3d_{i}.obj'
++    #         mesh3d = trimesh.Trimesh(vertices=vertices_i, faces=self.faces)
++    #         mesh3d.export(hand3d_path)
++    #         K_path = "<data_root>/cloth/cam_K.txt"
++    #         K = np.loadtxt(K_path)
++    #         hand_vertices_2d, _ = cv2.projectPoints(
++    #             vertices_i,
++    #             np.zeros(3),
++    #             np.zeros(3),
++    #             K,
++    #             None
++    #         )
++    #         # pdb.set_trace()
++    #         hand_vertices_2d = hand_vertices_2d.reshape(-1, 2)
++
++    #         fx = focal_length if focal_length is not None else self.focal_length
++    #         fy = fx
++    #         cx = render_res[0] / 2
++    #         cy = render_res[1] / 2
++    #         verts_x = vertices_i[:, 0]
++    #         verts_y = vertices_i[:, 1]
++    #         verts_z = vertices_i[:, 2]
++    #         fx = float(fx)
++    #         fy = float(fy)
++    #         cx = float(cx)
++    #         cy = float(cy)
++    #         u = fx * (verts_x / verts_z) + cx
++    #         v = fy * (verts_y / verts_z) + cy
++    #         # pdb.set_trace()
++    #         hand_vertices_2d = np.stack([u, v], axis=1)  # (N, 3), z=0
++
++    #         for vertex in hand_vertices_2d:
++    #             x, y = int(vertex[0]), int(vertex[1])
++    #             if 0 <= x < img_cv2_copy.shape[1] and 0 <= y < img_cv2_copy.shape[0]:
++    #                 cv2.circle(img_cv2_copy, (x, y), 2, (255, 0, 0), -1)  # Blue dots for hand vertices
++    #     # Convert back to (0, 1) range
++    #     # cv2.imwrite(f'{out_folder}/{img_fn}_render.png', color.astype(np.uint8))
++
++    #     return img_cv2_copy
++
++
++
+     def __call__(self,
+                 vertices: np.array,
+                 camera_translation: np.array,
+@@ -224,6 +398,7 @@ class Renderer:
+         camera_center = [image.shape[1] / 2., image.shape[0] / 2.]
+         camera = pyrender.IntrinsicsCamera(fx=self.focal_length, fy=self.focal_length,
+                                            cx=camera_center[0], cy=camera_center[1], zfar=1e12)
++        #pdb.set_trace()
+         scene.add(camera, pose=camera_pose)
+ 
+ 
+@@ -260,8 +435,7 @@ class Renderer:
+             mesh = trimesh.Trimesh(vertices.copy() + camera_translation, self.faces_left.copy(), vertex_colors=vertex_colors)
+         # mesh = trimesh.Trimesh(vertices.copy(), self.faces.copy())
+         
+-        rot = trimesh.transformations.rotation_matrix(
+-                np.radians(rot_angle), rot_axis)
++        rot = trimesh.transformations.rotation_matrix(np.radians(rot_angle), rot_axis)
+         mesh.apply_transform(rot)
+ 
+         rot = trimesh.transformations.rotation_matrix(
+@@ -269,67 +443,67 @@ class Renderer:
+         mesh.apply_transform(rot)
+         return mesh
+ 
+-    def render_rgba(
+-            self,
+-            vertices: np.array,
+-            cam_t = None,
+-            rot=None,
+-            rot_axis=[1,0,0],
+-            rot_angle=0,
+-            camera_z=3,
+-            # camera_translation: np.array,
+-            mesh_base_color=(1.0, 1.0, 0.9),
+-            scene_bg_color=(0,0,0),
+-            render_res=[256, 256],
+-            focal_length=None,
+-            is_right=None,
+-        ):
+-
+-        renderer = pyrender.OffscreenRenderer(viewport_width=render_res[0],
+-                                              viewport_height=render_res[1],
+-                                              point_size=1.0)
+-        # material = pyrender.MetallicRoughnessMaterial(
+-        #     metallicFactor=0.0,
+-        #     alphaMode='OPAQUE',
+-        #     baseColorFactor=(*mesh_base_color, 1.0))
+-
+-        focal_length = focal_length if focal_length is not None else self.focal_length
+-
+-        if cam_t is not None:
+-            camera_translation = cam_t.copy()
+-            camera_translation[0] *= -1.
+-        else:
+-            camera_translation = np.array([0, 0, camera_z * focal_length/render_res[1]])
+-
+-        mesh = self.vertices_to_trimesh(vertices, np.array([0, 0, 0]), mesh_base_color, rot_axis, rot_angle, is_right=is_right)
+-        mesh = pyrender.Mesh.from_trimesh(mesh)
+-        # mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
+-
+-        scene = pyrender.Scene(bg_color=[*scene_bg_color, 0.0],
+-                               ambient_light=(0.3, 0.3, 0.3))
+-        scene.add(mesh, 'mesh')
+-
+-        camera_pose = np.eye(4)
+-        camera_pose[:3, 3] = camera_translation
+-        camera_center = [render_res[0] / 2., render_res[1] / 2.]
+-        camera = pyrender.IntrinsicsCamera(fx=focal_length, fy=focal_length,
+-                                           cx=camera_center[0], cy=camera_center[1], zfar=1e12)
+-
+-        # Create camera node and add it to pyRender scene
+-        camera_node = pyrender.Node(camera=camera, matrix=camera_pose)
+-        scene.add_node(camera_node)
+-        self.add_point_lighting(scene, camera_node)
+-        self.add_lighting(scene, camera_node)
+-
+-        light_nodes = create_raymond_lights()
+-        for node in light_nodes:
+-            scene.add_node(node)
+-
+-        color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+-        color = color.astype(np.float32) / 255.0
+-        renderer.delete()
+-
+-        return color
++    # def render_rgba(
++    #         self,
++    #         vertices: np.array,
++    #         cam_t = None,
++    #         rot=None,
++    #         rot_axis=[1,0,0],
++    #         rot_angle=0,
++    #         camera_z=3,
++    #         # camera_translation: np.array,
++    #         mesh_base_color=(1.0, 1.0, 0.9),
++    #         scene_bg_color=(0,0,0),
++    #         render_res=[256, 256],
++    #         focal_length=None,
++    #         is_right=None,
++    #     ):
++
++    #     renderer = pyrender.OffscreenRenderer(viewport_width=render_res[0],
++    #                                           viewport_height=render_res[1],
++    #                                           point_size=1.0)
++    #     # material = pyrender.MetallicRoughnessMaterial(
++    #     #     metallicFactor=0.0,
++    #     #     alphaMode='OPAQUE',
++    #     #     baseColorFactor=(*mesh_base_color, 1.0))
++
++    #     focal_length = focal_length if focal_length is not None else self.focal_length
++
++    #     if cam_t is not None:
++    #         camera_translation = cam_t.copy()
++    #         camera_translation[0] *= -1.
++    #     else:
++    #         camera_translation = np.array([0, 0, camera_z * focal_length/render_res[1]])
++
++    #     mesh = self.vertices_to_trimesh(vertices, np.array([0, 0, 0]), mesh_base_color, rot_axis, rot_angle, is_right=is_right)
++    #     mesh = pyrender.Mesh.from_trimesh(mesh)
++    #     # mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
++
++    #     scene = pyrender.Scene(bg_color=[*scene_bg_color, 0.0],
++    #                            ambient_light=(0.3, 0.3, 0.3))
++    #     scene.add(mesh, 'mesh')
++
++    #     camera_pose = np.eye(4)
++    #     camera_pose[:3, 3] = camera_translation
++    #     camera_center = [render_res[0] / 2., render_res[1] / 2.]
++    #     camera = pyrender.IntrinsicsCamera(fx=focal_length, fy=focal_length,
++    #                                        cx=camera_center[0], cy=camera_center[1], zfar=1e12)
++
++    #     # Create camera node and add it to pyRender scene
++    #     camera_node = pyrender.Node(camera=camera, matrix=camera_pose)
++    #     scene.add_node(camera_node)
++    #     self.add_point_lighting(scene, camera_node)
++    #     self.add_lighting(scene, camera_node)
++
++    #     light_nodes = create_raymond_lights()
++    #     for node in light_nodes:
++    #         scene.add_node(node)
++
++    #     color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
++    #     color = color.astype(np.float32) / 255.0
++    #     renderer.delete()
++
++    #     return color
+ 
+     def render_rgba_multiple(
+             self,
+@@ -342,6 +516,9 @@ class Renderer:
+             render_res=[256, 256],
+             focal_length=None,
+             is_right=None,
++            img_fn=None,
++            out_folder=None,
++            scale_factor=1,
+         ):
+ 
+         renderer = pyrender.OffscreenRenderer(viewport_width=render_res[0],
+@@ -355,20 +532,55 @@ class Renderer:
+         if is_right is None:
+             is_right = [1 for _ in range(len(vertices))]
+ 
++        # scale the vertices by scale_factor
++        vertices = [vvv * scale_factor[i] for i, vvv in enumerate(vertices)]
++
++        for i, (vvv, ttt, sss) in enumerate(zip(vertices, cam_t, is_right)):
++            # Save 3D hand mesh in camera space (before extra rotation)
++            verts_cam = np.asarray(vvv.copy()) + ttt.copy()  # (N, 3)
++            # if (img_fn == "frame_000000"):
++            #     pdb.set_trace()
++            hand3d_path = f'{out_folder}/{img_fn}_right_3d_{i}.obj'
++            mesh3d = trimesh.Trimesh(vertices=verts_cam, faces=self.faces)
++            mesh3d.export(hand3d_path)
++            # Project to 2D using camera intrinsics and save as 2D mesh
++            # fx = focal_length if focal_length is not None else self.focal_length
++            # fy = fx
++            # cx = render_res[0] / 2
++            # cy = render_res[1] / 2
++            # x = verts_cam[:, 0]
++            # y = verts_cam[:, 1]
++            # z = verts_cam[:, 2]
++            # fx = float(fx)
++            # fy = float(fy)
++            # cx = float(cx)
++            # cy = float(cy)
++            # u = fx * (x / z) + cx
++            # v = fy * (y / z) + cy
++            # verts_2d = np.stack([u, v, np.zeros_like(u)], axis=1)  # (N, 3), z=0
++            # mesh_2d = trimesh.Trimesh(vertices=verts_2d, faces=self.faces)
++            # mesh_2d.export(f'{out_folder}/{img_fn}_right_2d_{i}.obj')
+         mesh_list = [pyrender.Mesh.from_trimesh(self.vertices_to_trimesh(vvv, ttt.copy(), mesh_base_color, rot_axis, rot_angle, is_right=sss)) for vvv,ttt,sss in zip(vertices, cam_t, is_right)]
+-
++        # pdb.set_trace()
+         scene = pyrender.Scene(bg_color=[*scene_bg_color, 0.0],
+                                ambient_light=(0.3, 0.3, 0.3))
+         for i,mesh in enumerate(mesh_list):
+             scene.add(mesh, f'mesh_{i}')
+ 
++        # object_path = os.path.join(os.path.dirname(out_folder), 'obj_mesh', f'{img_fn}_object_mesh.obj')
++        # mesh_obj = pyrender.Mesh.from_trimesh(trimesh.load(object_path))
++        # scene.add(mesh_obj, f'mesh_obj')
++        # # save the pyrender scene as obj
++        # scene.export(f'{out_folder}/{img_fn}_scene.obj')
++        # # save the trimesh scene as obj
++        # trimesh.Scene(mesh_list).export(f'{out_folder}/{img_fn}_trimesh_scene.obj')
++
+         camera_pose = np.eye(4)
+         # camera_pose[:3, 3] = camera_translation
+         camera_center = [render_res[0] / 2., render_res[1] / 2.]
+         focal_length = focal_length if focal_length is not None else self.focal_length
+         camera = pyrender.IntrinsicsCamera(fx=focal_length, fy=focal_length,
+                                            cx=camera_center[0], cy=camera_center[1], zfar=1e12)
+-
+         # Create camera node and add it to pyRender scene
+         camera_node = pyrender.Node(camera=camera, matrix=camera_pose)
+         scene.add_node(camera_node)
+@@ -380,6 +592,9 @@ class Renderer:
+             scene.add_node(node)
+ 
+         color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
++        # save render image
++        # cv2.imwrite(f'{out_folder}/{img_fn}_render.png', color.astype(np.uint8))
++
+         color = color.astype(np.float32) / 255.0
+         renderer.delete()
+ 
+@@ -421,3 +636,14 @@ class Renderer:
+             if scene.has_node(node):
+                 continue
+             scene.add_node(node)
++
++def export_hand_mesh_2d_raw(verts, cam_t, faces, out_path, fx, fy, cx, cy):
++    verts_cam = verts + cam_t  # (N, 3)
++    x = verts_cam[:, 0]
++    y = verts_cam[:, 1]
++    z = verts_cam[:, 2]
++    u = fx * (x / z) + cx
++    v = fy * (y / z) + cy
++    verts_2d = np.stack([u, v, np.zeros_like(u)], axis=1)
++    mesh_2d = trimesh.Trimesh(vertices=verts_2d, faces=faces)
++    mesh_2d.export(out_path)
+diff --git a/setup.py b/setup.py
+index 59b1cc5..752408a 100644
+--- a/setup.py
++++ b/setup.py
+@@ -7,16 +7,12 @@ setup(
+     packages=find_packages(),
+     install_requires=[
+         'gdown',
+-        'numpy',
+-        'opencv-python',
+         'pyrender',
+         'pytorch-lightning',
+         'scikit-image',
+         'smplx==0.1.28',
+-        'torch',
+-        'torchvision',
+         'yacs',
+-        'detectron2 @ git+https://github.com/facebookresearch/detectron2',
++        #'detectron2 @ git+https://github.com/facebookresearch/detectron2',
+         'chumpy @ git+https://github.com/mattloper/chumpy',
+         'mmcv==1.3.9',
+         'timm',

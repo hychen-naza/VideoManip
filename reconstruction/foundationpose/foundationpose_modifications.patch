@@ -1,0 +1,593 @@
+diff --git a/Utils.py b/Utils.py
+index 508b290..5548e41 100644
+--- a/Utils.py
++++ b/Utils.py
+@@ -98,9 +98,6 @@ def set_logging_format(level=logging.INFO):
+ 
+ set_logging_format()
+ 
+-
+-
+-
+ def make_mesh_tensors(mesh, device='cuda', max_tex_size=None):
+   mesh_tensors = {}
+   if isinstance(mesh.visual, trimesh.visual.texture.TextureVisuals):
+diff --git a/bundlesdf/mycuda/setup.py b/bundlesdf/mycuda/setup.py
+index ad00334..55fa596 100644
+--- a/bundlesdf/mycuda/setup.py
++++ b/bundlesdf/mycuda/setup.py
+@@ -15,8 +15,8 @@ from torch.utils.cpp_extension import load
+ code_dir = os.path.dirname(os.path.realpath(__file__))
+ 
+ 
+-nvcc_flags = ['-Xcompiler', '-O3', '-std=c++14', '-U__CUDA_NO_HALF_OPERATORS__', '-U__CUDA_NO_HALF_CONVERSIONS__', '-U__CUDA_NO_HALF2_OPERATORS__']
+-c_flags = ['-O3', '-std=c++14']
++nvcc_flags = ['-Xcompiler', '-O3', '-std=c++17', '-U__CUDA_NO_HALF_OPERATORS__', '-U__CUDA_NO_HALF_CONVERSIONS__', '-U__CUDA_NO_HALF2_OPERATORS__']
++c_flags = ['-O3', '-std=c++17']
+ 
+ setup(
+     name='common',
+diff --git a/datareader.py b/datareader.py
+index b7a6606..32f13cf 100644
+--- a/datareader.py
++++ b/datareader.py
+@@ -55,15 +55,17 @@ def get_bop_video_dirs(dataset):
+ 
+ 
+ class YcbineoatReader:
+-  def __init__(self,video_dir, downscale=1, shorter_side=None, zfar=np.inf):
++  def __init__(self,video_dir, downscale=1, shorter_side=None, zfar=np.inf, object_type="grasp"):
+     self.video_dir = video_dir
+     self.downscale = downscale
+     self.zfar = zfar
++    self.object_type = object_type
+     self.color_files = sorted(glob.glob(f"{self.video_dir}/rgb/*.png"))
+     self.K = np.loadtxt(f'{video_dir}/cam_K.txt').reshape(3,3)
+     self.id_strs = []
+     for color_file in self.color_files:
+       id_str = os.path.basename(color_file).replace('.png','')
++      id_str += f"_{self.object_type}_object"
+       self.id_strs.append(id_str)
+     self.H,self.W = cv2.imread(self.color_files[0]).shape[:2]
+ 
+@@ -110,7 +112,9 @@ class YcbineoatReader:
+     return color
+ 
+   def get_mask(self,i):
+-    mask = cv2.imread(self.color_files[i].replace('rgb','masks'),-1)
++    path = self.color_files[i].replace('rgb','masks_pred_obj')
++    path = path.split('.')[0] + f"_{self.object_type}_object.png"
++    mask = cv2.imread(path,-1)
+     if len(mask.shape)==3:
+       for c in range(3):
+         if mask[...,c].sum()>0:
+@@ -148,7 +152,7 @@ class YcbineoatReader:
+   def get_gt_mesh(self):
+     ob_name = self.videoname_to_object[self.get_video_name()]
+     YCB_VIDEO_DIR = os.getenv('YCB_VIDEO_DIR')
+-    mesh = trimesh.load(f'{YCB_VIDEO_DIR}/models/{ob_name}/textured_simple.obj')
++    mesh = trimesh.load(f'{YCB_VIDEO_DIR}/models/{ob_name}/textured_simple_{self.object_type}.obj')
+     return mesh
+ 
+ 
+diff --git a/docker/dockerfile b/docker/dockerfile
+index fc235a8..ade3c63 100644
+--- a/docker/dockerfile
++++ b/docker/dockerfile
+@@ -1,4 +1,4 @@
+-FROM nvidia/cudagl:11.3.0-devel-ubuntu20.04
++FROM nvidia/cudagl:12.1.0-devel-ubuntu20.04
+ 
+ ENV TZ=US/Pacific
+ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+@@ -38,7 +38,7 @@ ENV PATH $PATH:/opt/conda/envs/my/bin
+ RUN conda init bash &&\
+     echo "conda activate my" >> ~/.bashrc &&\
+     conda activate my &&\
+-    pip install torch==2.0.0+cu118 torchvision==0.15.1+cu118 torchaudio==2.0.1 --index-url https://download.pytorch.org/whl/cu118 &&\
++    pip install torchvision==0.16.0+cu121 torchaudio==2.1.0 torch==2.1.0+cu121 --index-url https://download.pytorch.org/whl/cu121 &&\
+     pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" &&\
+     pip install scipy joblib scikit-learn ruamel.yaml trimesh pyyaml opencv-python imageio open3d transformations warp-lang einops kornia pyrender
+ 
+diff --git a/docker/run_container.sh b/docker/run_container.sh
+index 8503571..583f061 100644
+--- a/docker/run_container.sh
++++ b/docker/run_container.sh
+@@ -1,3 +1,4 @@
+ docker rm -f foundationpose
+ DIR=$(pwd)/../
+-xhost +  && docker run --gpus all --env NVIDIA_DISABLE_REQUIRE=1 -it --network=host --name foundationpose  --cap-add=SYS_PTRACE --security-opt seccomp=unconfined -v $DIR:$DIR -v /home:/home -v /mnt:/mnt -v /tmp/.X11-unix:/tmp/.X11-unix -v /tmp:/tmp  --ipc=host -e DISPLAY=${DISPLAY} -e GIT_INDEX_FILE foundationpose:latest bash -c "cd $DIR && bash"
++# xhost +  && 
++docker run --gpus all --env NVIDIA_DISABLE_REQUIRE=1 -it --network=host --name foundationpose  --cap-add=SYS_PTRACE --security-opt seccomp=unconfined -v $DIR:$DIR -v /home:/home -v /mnt:/mnt -v /tmp/.X11-unix:/tmp/.X11-unix -v /tmp:/tmp  --ipc=host -e DISPLAY=${DISPLAY} -e GIT_INDEX_FILE foundationpose:latest bash -c "cd $DIR && bash"
+diff --git a/estimater.py b/estimater.py
+index e147d56..be58ae0 100644
+--- a/estimater.py
++++ b/estimater.py
+@@ -13,7 +13,7 @@ import itertools
+ from learning.training.predict_score import *
+ from learning.training.predict_pose_refine import *
+ import yaml
+-
++import pdb
+ 
+ class FoundationPose:
+   def __init__(self, model_pts, model_normals, symmetry_tfs=None, mesh=None, scorer:ScorePredictor=None, refiner:PoseRefinePredictor=None, glctx=None, debug=0, debug_dir='/home/bowen/debug/novel_pose_debug/'):
+@@ -117,6 +117,7 @@ class FoundationPose:
+ 
+     rot_grid = np.asarray(rot_grid)
+     logging.info(f"rot_grid:{rot_grid.shape}")
++
+     rot_grid = mycpp.cluster_poses(30, 99999, rot_grid, self.symmetry_tfs.data.cpu().numpy())
+     rot_grid = np.asarray(rot_grid)
+     logging.info(f"after cluster, rot_grid:{rot_grid.shape}")
+@@ -212,6 +213,7 @@ class FoundationPose:
+     logging.info(f"after viewpoint, add_errs min:{add_errs.min()}")
+ 
+     xyz_map = depth2xyzmap(depth, K)
++    # pdb.set_trace()
+     poses, vis = self.refiner.predict(mesh=self.mesh, mesh_tensors=self.mesh_tensors, rgb=rgb, depth=depth, K=K, ob_in_cams=poses.data.cpu().numpy(), normal_map=normal_map, xyz_map=xyz_map, glctx=self.glctx, mesh_diameter=self.diameter, iteration=iteration, get_vis=self.debug>=2)
+     if vis is not None:
+       imageio.imwrite(f'{self.debug_dir}/vis_refiner.png', vis)
+@@ -236,7 +238,7 @@ class FoundationPose:
+ 
+     self.poses = poses
+     self.scores = scores
+-
++    # pdb.set_trace()
+     return best_pose.data.cpu().numpy()
+ 
+ 
+diff --git a/learning/datasets/h5_dataset.py b/learning/datasets/h5_dataset.py
+index 3bb51a5..1cd5488 100644
+--- a/learning/datasets/h5_dataset.py
++++ b/learning/datasets/h5_dataset.py
+@@ -13,8 +13,7 @@ code_dir = os.path.dirname(os.path.realpath(__file__))
+ sys.path.append(f'{code_dir}/../../../../')
+ from Utils import *
+ from learning.datasets.pose_dataset import *
+-
+-
++import pdb
+ 
+ 
+ class PairH5Dataset(torch.utils.data.Dataset):
+@@ -89,6 +88,8 @@ class PairH5Dataset(torch.utils.data.Dataset):
+       depthAs_ori = kornia.geometry.transform.warp_perspective(batch.depthAs.cuda().expand(bs,-1,-1,-1), crop_to_oris, dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
+       batch.xyz_mapAs = depth2xyzmap_batch(depthAs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
+       batch.xyz_mapAs = kornia.geometry.transform.warp_perspective(batch.xyz_mapAs, tf_to_crops, dsize=(H,W), mode='nearest', align_corners=False)
++      torch.cuda.empty_cache()  # Clear cache after first warp operation
++    
+     batch.xyz_mapAs = batch.xyz_mapAs.cuda()
+     if self.cfg['normalize_xyz']:
+       invalid = batch.xyz_mapAs[:,2:3]<0.001
+@@ -97,11 +98,14 @@ class PairH5Dataset(torch.utils.data.Dataset):
+       batch.xyz_mapAs *= 1/mesh_radius.reshape(bs,1,1,1)
+       invalid = invalid.expand(bs,3,-1,-1) | (torch.abs(batch.xyz_mapAs)>=2)
+       batch.xyz_mapAs[invalid.expand(bs,3,-1,-1)] = 0
++    torch.cuda.empty_cache()  # Clear cache after first xyz map processing
+ 
+     if batch.xyz_mapBs is None:
+       depthBs_ori = kornia.geometry.transform.warp_perspective(batch.depthBs.cuda().expand(bs,-1,-1,-1), crop_to_oris, dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
+       batch.xyz_mapBs = depth2xyzmap_batch(depthBs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
+       batch.xyz_mapBs = kornia.geometry.transform.warp_perspective(batch.xyz_mapBs, tf_to_crops, dsize=(H,W), mode='nearest', align_corners=False)
++      torch.cuda.empty_cache()  # Clear cache after second warp operation
++    
+     batch.xyz_mapBs = batch.xyz_mapBs.cuda()
+     if self.cfg['normalize_xyz']:
+       invalid = batch.xyz_mapBs[:,2:3]<0.001
+@@ -110,6 +114,7 @@ class PairH5Dataset(torch.utils.data.Dataset):
+       batch.xyz_mapBs *= 1/mesh_radius.reshape(bs,1,1,1)
+       invalid = invalid.expand(bs,3,-1,-1) | (torch.abs(batch.xyz_mapBs)>=2)
+       batch.xyz_mapBs[invalid.expand(bs,3,-1,-1)] = 0
++    torch.cuda.empty_cache()  # Clear cache after second xyz map processing
+ 
+     return batch
+ 
+@@ -147,6 +152,8 @@ class TripletH5Dataset(PairH5Dataset):
+       depthAs_ori = kornia.geometry.transform.warp_perspective(batch.depthAs.cuda().expand(bs,-1,-1,-1), crop_to_oris, dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
+       batch.xyz_mapAs = depth2xyzmap_batch(depthAs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
+       batch.xyz_mapAs = kornia.geometry.transform.warp_perspective(batch.xyz_mapAs, tf_to_crops, dsize=(H,W), mode='nearest', align_corners=False)
++      torch.cuda.empty_cache()  # Clear cache after first warp operation
++    
+     batch.xyz_mapAs = batch.xyz_mapAs.cuda()
+     invalid = batch.xyz_mapAs[:,2:3]<0.1
+     batch.xyz_mapAs = (batch.xyz_mapAs-batch.poseA[:,:3,3].reshape(bs,3,1,1))
+@@ -154,11 +161,35 @@ class TripletH5Dataset(PairH5Dataset):
+       batch.xyz_mapAs *= 1/mesh_radius.reshape(bs,1,1,1)
+       invalid = invalid.expand(bs,3,-1,-1) | (torch.abs(batch.xyz_mapAs)>=2)
+       batch.xyz_mapAs[invalid.expand(bs,3,-1,-1)] = 0
++    torch.cuda.empty_cache()  # Clear cache after first xyz map processing
+ 
+     if batch.xyz_mapBs is None:
+-      depthBs_ori = kornia.geometry.transform.warp_perspective(batch.depthBs.cuda().expand(bs,-1,-1,-1), crop_to_oris, dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
+-      batch.xyz_mapBs = depth2xyzmap_batch(depthBs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
+-      batch.xyz_mapBs = kornia.geometry.transform.warp_perspective(batch.xyz_mapBs, tf_to_crops, dsize=(H,W), mode='nearest', align_corners=False)
++      # depthBs_ori = kornia.geometry.transform.warp_perspective(batch.depthBs.cpu().expand(bs,-1,-1,-1), crop_to_oris, dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
++      # batch.xyz_mapBs = depth2xyzmap_batch(depthBs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
++      # batch.xyz_mapBs = kornia.geometry.transform.warp_perspective(batch.xyz_mapBs, tf_to_crops, dsize=(H,W), mode='nearest', align_corners=False)
++      # torch.cuda.empty_cache()  # Clear cache after second warp operation
++
++      # Keep computation on CPU
++      depthBs_ori = kornia.geometry.transform.warp_perspective(
++        batch.depthBs.cpu().expand(bs,-1,-1,-1), 
++        crop_to_oris.cpu(), 
++        dsize=(H_ori, W_ori), 
++        mode='nearest', 
++        align_corners=False
++      )
++      # Move to GPU only for depth2xyzmap_batch
++      batch.xyz_mapBs = depth2xyzmap_batch(depthBs_ori[:,0].cuda(), batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
++      # Keep warp perspective on CPU
++      batch.xyz_mapBs = kornia.geometry.transform.warp_perspective(
++        batch.xyz_mapBs.cpu(), 
++        tf_to_crops.cpu(), 
++        dsize=(H,W), 
++        mode='nearest', 
++        align_corners=False
++      )
++      # move to GPU
++      batch.xyz_mapBs = batch.xyz_mapBs.cuda()
++
+     batch.xyz_mapBs = batch.xyz_mapBs.cuda()
+     invalid = batch.xyz_mapBs[:,2:3]<0.1
+     batch.xyz_mapBs = (batch.xyz_mapBs-batch.poseA[:,:3,3].reshape(bs,3,1,1))
+@@ -166,6 +197,7 @@ class TripletH5Dataset(PairH5Dataset):
+       batch.xyz_mapBs *= 1/mesh_radius.reshape(bs,1,1,1)
+       invalid = invalid.expand(bs,3,-1,-1) | (torch.abs(batch.xyz_mapBs)>=2)
+       batch.xyz_mapBs[invalid.expand(bs,3,-1,-1)] = 0
++    torch.cuda.empty_cache()  # Clear cache after second xyz map processing
+ 
+     return batch
+ 
+@@ -174,7 +206,6 @@ class TripletH5Dataset(PairH5Dataset):
+     bs = len(batch.rgbAs)
+     batch.rgbAs = batch.rgbAs.cuda().float()/255.0
+     batch.rgbBs = batch.rgbBs.cuda().float()/255.0
+-
+     batch = self.transform_depth_to_xyzmap(batch, H_ori, W_ori, bound=bound)
+     return batch
+ 
+diff --git a/learning/training/predict_pose_refine.py b/learning/training/predict_pose_refine.py
+index fabb888..98feff6 100644
+--- a/learning/training/predict_pose_refine.py
++++ b/learning/training/predict_pose_refine.py
+@@ -19,6 +19,7 @@ from learning.models.refine_network import RefineNet
+ from learning.datasets.h5_dataset import *
+ from Utils import *
+ from datareader import *
++import pdb
+ 
+ 
+ 
+@@ -35,22 +36,31 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
+   B = len(ob_in_cams)
+   poseA = torch.as_tensor(ob_in_cams, dtype=torch.float, device='cuda')
+ 
+-  bs = 512
++  bs = 128 #512
+   rgb_rs = []
+   depth_rs = []
+   normal_rs = []
+   xyz_map_rs = []
+ 
+   bbox2d_crop = torch.as_tensor(np.array([0, 0, cfg['input_resize'][0]-1, cfg['input_resize'][1]-1]).reshape(2,2), device='cuda', dtype=torch.float)
++
+   bbox2d_ori = transform_pts(bbox2d_crop, tf_to_crops.inverse()).reshape(-1,4)
+ 
+   for b in range(0,len(poseA),bs):
++    # Clear cache before each batch to help with memory fragmentation
++    torch.cuda.empty_cache()
++    
+     extra = {}
+     rgb_r, depth_r, normal_r = nvdiffrast_render(K=K, H=H, W=W, ob_in_cams=poseA[b:b+bs], context='cuda', get_normal=cfg['use_normal'], glctx=glctx, mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
+     rgb_rs.append(rgb_r)
+     depth_rs.append(depth_r[...,None])
+     normal_rs.append(normal_r)
+     xyz_map_rs.append(extra['xyz_map'])
++    
++    # Clear intermediate tensors after each batch
++    del rgb_r, depth_r, normal_r, extra
++    torch.cuda.empty_cache()
++
+   rgb_rs = torch.cat(rgb_rs, dim=0).permute(0,3,1,2) * 255
+   depth_rs = torch.cat(depth_rs, dim=0).permute(0,3,1,2)  #(B,1,H,W)
+   xyz_map_rs = torch.cat(xyz_map_rs, dim=0).permute(0,3,1,2)  #(B,3,H,W)
+@@ -183,7 +193,15 @@ class PoseRefinePredictor:
+       logging.info("making cropped data")
+       pose_data = make_crop_data_batch(self.cfg.input_resize, B_in_cams, mesh_centered, rgb_tensor, depth_tensor, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter)
+       B_in_cams = []
++      
++      # Initialize variables to store last batch updates
++      last_trans_delta = None
++      last_rot_mat_delta = None
++      
+       for b in range(0, pose_data.rgbAs.shape[0], bs):
++        # Clear cache before processing each batch
++        torch.cuda.empty_cache()
++        
+         A = torch.cat([pose_data.rgbAs[b:b+bs].cuda(), pose_data.xyz_mapAs[b:b+bs].cuda()], dim=1).float()
+         B = torch.cat([pose_data.rgbBs[b:b+bs].cuda(), pose_data.xyz_mapBs[b:b+bs].cuda()], dim=1).float()
+         logging.info("forward start")
+@@ -192,6 +210,11 @@ class PoseRefinePredictor:
+         for k in output:
+           output[k] = output[k].float()
+         logging.info("forward done")
++        
++        # Clear intermediate tensors
++        del A, B
++        torch.cuda.empty_cache()
++        
+         if self.cfg['trans_rep']=='tracknet':
+           if not self.cfg['normalize_xyz']:
+             trans_delta = torch.tanh(output["trans"])*trans_normalizer
+@@ -230,18 +253,36 @@ class PoseRefinePredictor:
+ 
+         B_in_cam = egocentric_delta_pose_to_pose(pose_data.poseA[b:b+bs], trans_delta=trans_delta, rot_mat_delta=rot_mat_delta)
+         B_in_cams.append(B_in_cam)
++        
++        # Store the last batch updates
++        last_trans_delta = trans_delta
++        last_rot_mat_delta = rot_mat_delta
++        
++        # Clear output tensors after processing
++        del output, trans_delta, rot_mat_delta, B_in_cam
++        torch.cuda.empty_cache()
+ 
+       B_in_cams = torch.cat(B_in_cams, dim=0).reshape(len(ob_in_cams),4,4)
++      
++      # Clear pose_data after each iteration
++      del pose_data
++      torch.cuda.empty_cache()
+ 
+     B_in_cams_out = B_in_cams@torch.tensor(tf_to_center[None], device='cuda', dtype=torch.float)
+     torch.cuda.empty_cache()
+-    self.last_trans_update = trans_delta
+-    self.last_rot_update = rot_mat_delta
+-
++    
++    # Use the stored last batch updates
++    self.last_trans_update = last_trans_delta
++    self.last_rot_update = last_rot_mat_delta
++    #pdb.set_trace()
+     if get_vis:
+       logging.info("get_vis...")
+       canvas = []
+       padding = 2
++      
++      # Clear cache before visualization
++      torch.cuda.empty_cache()
++      
+       pose_data = make_crop_data_batch(self.cfg.input_resize, torch.as_tensor(ob_centered_in_cams), mesh_centered, rgb, depth, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter)
+       for id in range(0, len(B_in_cams)):
+         rgbA_vis = (pose_data.rgbAs[id]*255).permute(1,2,0).data.cpu().numpy()
+@@ -266,6 +307,9 @@ class PoseRefinePredictor:
+         canvas.append(row)
+       canvas = make_grid_image(canvas, nrow=1, padding=padding, pad_value=255)
+ 
++      # Clear cache before second visualization
++      torch.cuda.empty_cache()
++      
+       pose_data = make_crop_data_batch(self.cfg.input_resize, B_in_cams, mesh_centered, rgb, depth, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter)
+       canvas_refined = []
+       for id in range(0, len(B_in_cams)):
+@@ -289,6 +333,8 @@ class PoseRefinePredictor:
+ 
+       canvas_refined = make_grid_image(canvas_refined, nrow=1, padding=padding, pad_value=255)
+       canvas = make_grid_image([canvas, canvas_refined], nrow=2, padding=padding, pad_value=255)
++      
++      # Clear cache after visualization
+       torch.cuda.empty_cache()
+       return B_in_cams_out, canvas
+ 
+diff --git a/learning/training/predict_score.py b/learning/training/predict_score.py
+index 6e15f62..58b0b0f 100644
+--- a/learning/training/predict_score.py
++++ b/learning/training/predict_score.py
+@@ -22,7 +22,7 @@ from learning.models.score_network import *
+ from learning.datasets.pose_dataset import *
+ from Utils import *
+ from datareader import *
+-
++import pdb
+ 
+ def vis_batch_data_scores(pose_data, ids, scores, pad_margin=5):
+   assert len(scores)==len(ids)
+@@ -66,26 +66,26 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
+   B = len(ob_in_cams)
+   poseAs = torch.as_tensor(ob_in_cams, dtype=torch.float, device='cuda')
+ 
+-  bs = 512
++  bs = 32 #512
+   rgb_rs = []
+   depth_rs = []
+   xyz_map_rs = []
+ 
+   bbox2d_crop = torch.as_tensor(np.array([0, 0, cfg['input_resize'][0]-1, cfg['input_resize'][1]-1]).reshape(2,2), device='cuda', dtype=torch.float)
+   bbox2d_ori = transform_pts(bbox2d_crop, tf_to_crops.inverse()[:,None]).reshape(-1,4)
+-
++  #pdb.set_trace()
+   for b in range(0,len(ob_in_cams),bs):
+     extra = {}
+     rgb_r, depth_r, normal_r = nvdiffrast_render(K=K, H=H, W=W, ob_in_cams=poseAs[b:b+bs], context='cuda', get_normal=cfg['use_normal'], glctx=glctx, mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
+     rgb_rs.append(rgb_r)
+     depth_rs.append(depth_r[...,None])
+     xyz_map_rs.append(extra['xyz_map'])
+-
++  
+   rgb_rs = torch.cat(rgb_rs, dim=0).permute(0,3,1,2) * 255
+   depth_rs = torch.cat(depth_rs, dim=0).permute(0,3,1,2)
+   xyz_map_rs = torch.cat(xyz_map_rs, dim=0).permute(0,3,1,2)  #(B,3,H,W)
+   logging.info("render done")
+-
++  
+   rgbBs = kornia.geometry.transform.warp_perspective(torch.as_tensor(rgb, dtype=torch.float, device='cuda').permute(2,0,1)[None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='bilinear', align_corners=False)
+   depthBs = kornia.geometry.transform.warp_perspective(torch.as_tensor(depth, dtype=torch.float, device='cuda')[None,None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='nearest', align_corners=False)
+   if rgb_rs.shape[-2:]!=cfg['input_resize']:
+@@ -105,8 +105,9 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
+ 
+   Ks = torch.as_tensor(K, dtype=torch.float).reshape(1,3,3).expand(len(rgbAs),3,3)
+   mesh_diameters = torch.ones((len(rgbAs)), dtype=torch.float, device='cuda')*mesh_diameter
+-
++  
+   pose_data = BatchPoseData(rgbAs=rgbAs, rgbBs=rgbBs, depthAs=depthAs, depthBs=depthBs, normalAs=normalAs, normalBs=normalBs, poseA=poseAs, xyz_mapAs=xyz_mapAs, tf_to_crops=tf_to_crops, Ks=Ks, mesh_diameters=mesh_diameters)
++  #pdb.set_trace()
+   pose_data = dataset.transform_batch(pose_data, H_ori=H, W_ori=W, bound=1)
+ 
+   logging.info("pose batch data done")
+@@ -176,9 +177,7 @@ class ScorePredictor:
+ 
+     rgb = torch.as_tensor(rgb, device='cuda', dtype=torch.float)
+     depth = torch.as_tensor(depth, device='cuda', dtype=torch.float)
+-
+     pose_data = make_crop_data_batch(self.cfg.input_resize, ob_in_cams, mesh, rgb, depth, K, crop_ratio=self.cfg['crop_ratio'], glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, cfg=self.cfg, mesh_diameter=mesh_diameter)
+-
+     def find_best_among_pairs(pose_data:BatchPoseData):
+       logging.info(f'pose_data.rgbAs.shape[0]: {pose_data.rgbAs.shape[0]}')
+       ids = []
+diff --git a/learning/training/training_config.py b/learning/training/training_config.py
+index 9d689c6..2ef4c35 100644
+--- a/learning/training/training_config.py
++++ b/learning/training/training_config.py
+@@ -36,7 +36,7 @@ class TrainingConfig(omegaconf.dictconfig.DictConfig):
+     exp_name:Optional[str] = None
+     resume_run_id: Optional[str] = None
+     save_dir: Optional[str] = None
+-    batch_size: int = 64
++    batch_size: int = 8 #64
+     epoch_size: int = 115200
+     val_size: int = 1280
+     n_epochs: int = 25
+diff --git a/run_demo.py b/run_demo.py
+index fc542b4..e89de18 100644
+--- a/run_demo.py
++++ b/run_demo.py
+@@ -6,17 +6,30 @@
+ # distribution of this software and related documentation without an express
+ # license agreement from NVIDIA CORPORATION is strictly prohibited.
+ 
+-
++import os
++import torch
+ from estimater import *
+ from datareader import *
+ import argparse
+-
++import pdb 
++import cv2
++from tqdm import tqdm
+ 
+ if __name__=='__main__':
++  # Set memory optimization settings
++  torch.cuda.empty_cache()
++  torch.backends.cudnn.benchmark = True
++  torch.backends.cuda.matmul.allow_tf32 = True
++  torch.backends.cudnn.allow_tf32 = True
++  
++  # Set memory allocation settings
++  os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
++
++  object_folder = "mustard0"
+   parser = argparse.ArgumentParser()
+   code_dir = os.path.dirname(os.path.realpath(__file__))
+-  parser.add_argument('--mesh_file', type=str, default=f'{code_dir}/demo_data/mustard0/mesh/textured_simple.obj')
+-  parser.add_argument('--test_scene_dir', type=str, default=f'{code_dir}/demo_data/mustard0')
++  parser.add_argument('--mesh_file', type=str, default=f'{code_dir}/demo_data/{object_folder}/mesh_original/textured_simple.obj')
++  parser.add_argument('--test_scene_dir', type=str, default=f'{code_dir}/demo_data/{object_folder}')
+   parser.add_argument('--est_refine_iter', type=int, default=5)
+   parser.add_argument('--track_refine_iter', type=int, default=2)
+   parser.add_argument('--debug', type=int, default=1)
+@@ -43,8 +56,24 @@ if __name__=='__main__':
+ 
+   reader = YcbineoatReader(video_dir=args.test_scene_dir, shorter_side=None, zfar=np.inf)
+ 
+-  for i in range(len(reader.color_files)):
+-    logging.info(f'i:{i}')
++  # Initialize video writer
++  fps = 30
++  frame_size = (1080, 1920)  # Will be updated with actual frame size
++  video_path = f'{debug_dir}/foundationpose_output_{object_folder}.mp4'
++  
++  # Get first frame to determine video size
++  first_color = reader.get_color(0)
++  frame_size = (first_color.shape[1], first_color.shape[0])
++  
++  fourcc = cv2.VideoWriter_fourcc(*'mp4v')
++  video_writer = cv2.VideoWriter(video_path, fourcc, fps, frame_size)
++  
++  if not video_writer.isOpened():
++    logging.error(f"Could not open video writer for {video_path}")
++    exit(1)
++
++  # Process frames with progress bar
++  for i in tqdm(range(20), desc="Processing frames"): #len(reader.color_files)
+     color = reader.get_color(i)
+     depth = reader.get_depth(i)
+     if i==0:
+@@ -67,13 +96,62 @@ if __name__=='__main__':
+ 
+     if debug>=1:
+       center_pose = pose@np.linalg.inv(to_origin)
+-      vis = draw_posed_3d_box(reader.K, img=color, ob_in_cam=center_pose, bbox=bbox)
+-      vis = draw_xyz_axis(color, ob_in_cam=center_pose, scale=0.1, K=reader.K, thickness=3, transparency=0, is_input_rgb=True)
+-      cv2.imshow('1', vis[...,::-1])
+-      cv2.waitKey(1)
++      # First draw the coordinate axes on a copy of the image
++      coord_vis = draw_posed_3d_box(reader.K, img=color.copy(), ob_in_cam=center_pose, bbox=bbox)
++      coord_vis = draw_xyz_axis(color.copy(), ob_in_cam=center_pose, scale=0.1, K=reader.K, thickness=3, transparency=0, is_input_rgb=True)
++      
++      # Get mesh vertices and faces
++      vertices = est.mesh.vertices
++      faces = est.mesh.faces
++      
++      # Transform vertices to camera space
++      vertices_homo = np.concatenate([vertices, np.ones((len(vertices), 1))], axis=1)
++      vertices_cam = (pose @ vertices_homo.T).T[:, :3]
++      
++      # Project vertices to image plane
++      vertices_2d, _ = cv2.projectPoints(
++          vertices_cam,
++          np.zeros(3),  # rotation vector (zero since vertices are already in camera space)
++          np.zeros(3),  # translation vector (zero since vertices are already in camera space)
++          reader.K,
++          None
++      )
++      vertices_2d = vertices_2d.reshape(-1, 2)
++      
++      # Create mask for visible faces
++      mask = np.zeros(color.shape[:2], dtype=np.uint8)
++      
++      # Draw each face
++      for face_idx, face in enumerate(faces):
++          # Get 2D points for this face
++          pts = vertices_2d[face].astype(np.int32)
++          
++          # Check if face is visible (all points are in front of camera)
++          if np.all(vertices_cam[face, 2] > 0):
++              # Draw filled polygon
++              cv2.fillPoly(mask, [pts], 1)
++      
++      # Create visualization with just the mask
++      mesh_vis = np.zeros_like(color)
++      mesh_vis[mask > 0] = [255, 255, 255]  # White color for mask
++      
++      # Blend mask with original image
++      alpha = 0.5
++      blended = cv2.addWeighted(color, 1, mesh_vis, alpha, 0)
++      
++      # Add coordinate axes on top without blending
++      coord_mask = (coord_vis != color).any(axis=2)
++      blended[coord_mask] = coord_vis[coord_mask]
++      
++      # Write frame to video instead of showing
++      video_writer.write(blended[...,::-1])  # Convert RGB to BGR for OpenCV
+ 
+ 
+     if debug>=2:
+       os.makedirs(f'{debug_dir}/track_vis', exist_ok=True)
+-      imageio.imwrite(f'{debug_dir}/track_vis/{reader.id_strs[i]}.png', vis)
++      imageio.imwrite(f'{debug_dir}/track_vis/{reader.id_strs[i]}.png', blended)
++
++  # Release video writer
++  video_writer.release()
++  logging.info(f"Video saved to: {video_path}")
+ 

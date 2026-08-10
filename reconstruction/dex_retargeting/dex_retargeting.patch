@@ -1,0 +1,359 @@
+diff --git a/assets b/assets
+--- a/assets
++++ b/assets
+@@ -1 +1 @@
+-Subproject commit 7304c7fb59214dab870eca02cf26f76e944e12df
++Subproject commit 7304c7fb59214dab870eca02cf26f76e944e12df-dirty
+diff --git a/dex_retargeting/configs/offline/inspire_hand_right.yml b/dex_retargeting/configs/offline/inspire_hand_right.yml
+index 3fb2cbf..fdd5dbf 100644
+--- a/dex_retargeting/configs/offline/inspire_hand_right.yml
++++ b/dex_retargeting/configs/offline/inspire_hand_right.yml
+@@ -1,12 +1,15 @@
+ retargeting:
+   type: position
+-  urdf_path: inspire_hand/inspire_hand_right.urdf
++  urdf_path: inspire/inspire_hand_right.urdf
+ 
+   target_joint_names: [ 'pinky_proximal_joint', 'ring_proximal_joint', 'middle_proximal_joint', 'index_proximal_joint',
+                         'thumb_proximal_pitch_joint', 'thumb_proximal_yaw_joint' ]
+-  target_link_names: [ "thumb_tip",  "index_tip", "middle_tip", "ring_tip", "pinky_tip" ]
+-
+-  target_link_human_indices: [ 4, 8, 12, 16, 20 ]
++  target_link_names: ["thumb_intermediate", "thumb_tip",  "index_intermediate", "index_tip", "middle_intermediate", "middle_tip", "ring_intermediate", "ring_tip", "pinky_intermediate", "pinky_tip" ]
++  target_link_human_indices: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20 ]
++  # target_link_names: ["hand_base_link", "thumb_intermediate", "index_intermediate", "index_tip", "middle_intermediate", "middle_tip", "ring_intermediate", "pinky_intermediate"]
++  # target_link_human_indices: [0, 2, 6, 8, 10, 12, 14, 18]
++  # target_link_names: ["hand_base_link", "thumb_tip", "index_tip", "middle_tip", "ring_tip", "pinky_tip" ]
++  # target_link_human_indices: [0, 4, 8, 12, 16, 20 ]
+   add_dummy_free_joint: True
+ 
+   # A smaller alpha means stronger filtering, i.e. more smooth but also larger latency
+diff --git a/dex_retargeting/configs/offline/leap_hand_right.yml b/dex_retargeting/configs/offline/leap_hand_right.yml
+index a8701f0..2755aac 100644
+--- a/dex_retargeting/configs/offline/leap_hand_right.yml
++++ b/dex_retargeting/configs/offline/leap_hand_right.yml
+@@ -5,9 +5,10 @@ retargeting:
+   target_joint_names: null
+   target_link_names: [ "thumb_tip_head", "index_tip_head", "middle_tip_head", "ring_tip_head", "thumb_dip", "dip", "dip_2", "dip_3" ]
+ 
+-  target_link_human_indices: [ 4, 8, 12, 16, 2, 6, 10, 14 ]
++  target_link_human_indices: [ 4, 8, 12, 16, 2, 6, 10, 14]
+   add_dummy_free_joint: True
+ 
+   # A smaller alpha means stronger filtering, i.e. more smooth but also larger latency
+   # 1 means no filter while 0 means not moving
+   low_pass_alpha: 1
++  scaling_factor: 1
+\ No newline at end of file
+diff --git a/dex_retargeting/constants.py b/dex_retargeting/constants.py
+index 4b7147a..e429400 100644
+--- a/dex_retargeting/constants.py
++++ b/dex_retargeting/constants.py
+@@ -29,6 +29,8 @@ class RobotName(enum.Enum):
+     ability = enum.auto()
+     inspire = enum.auto()
+     panda = enum.auto()
++    umi = enum.auto()
++    rby1 = enum.auto()
+ 
+ 
+ class RetargetingType(enum.Enum):
+@@ -50,6 +52,8 @@ ROBOT_NAME_MAP = {
+     RobotName.ability: "ability_hand",
+     RobotName.inspire: "inspire_hand",
+     RobotName.panda: "panda_gripper",
++    RobotName.umi: "umi_gripper",
++    RobotName.rby1: "rby1_gripper",
+ }
+ 
+ ROBOT_NAMES = list(ROBOT_NAME_MAP.keys())
+diff --git a/dex_retargeting/optimizer.py b/dex_retargeting/optimizer.py
+index f8d3eb7..4ff52eb 100644
+--- a/dex_retargeting/optimizer.py
++++ b/dex_retargeting/optimizer.py
+@@ -7,7 +7,7 @@ import torch
+ 
+ from dex_retargeting.kinematics_adaptor import KinematicAdaptor, MimicJointKinematicAdaptor
+ from dex_retargeting.robot_wrapper import RobotWrapper
+-
++import pdb
+ 
+ class Optimizer:
+     retargeting_type = "BASE"
+@@ -29,9 +29,10 @@ class Optimizer:
+             idx_pin2target.append(joint_names.index(target_joint_name))
+         self.target_joint_names = target_joint_names
+         self.idx_pin2target = np.array(idx_pin2target)
+-
++        # pdb.set_trace()
+         self.idx_pin2fixed = np.array([i for i in range(robot.dof) if i not in idx_pin2target], dtype=int)
+         self.opt = nlopt.opt(nlopt.LD_SLSQP, len(idx_pin2target))
++        self.opt.set_maxeval(100)
+         self.opt_dof = len(idx_pin2target)  # This dof includes the mimic joints
+ 
+         # Target
+@@ -40,7 +41,6 @@ class Optimizer:
+         # Free joint
+         link_names = robot.link_names
+         self.has_free_joint = len([name for name in link_names if "dummy" in name]) >= 6
+-
+         # Kinematics adaptor
+         self.adaptor: Optional[KinematicAdaptor] = None
+ 
+@@ -55,13 +55,13 @@ class Optimizer:
+ 
+     def set_kinematic_adaptor(self, adaptor: KinematicAdaptor):
+         self.adaptor = adaptor
+-
+         # Remove mimic joints from fixed joint list
+         if isinstance(adaptor, MimicJointKinematicAdaptor):
+             fixed_idx = self.idx_pin2fixed
+             mimic_idx = adaptor.idx_pin2mimic
+             new_fixed_id = np.array([x for x in fixed_idx if x not in mimic_idx], dtype=int)
+             self.idx_pin2fixed = new_fixed_id
++        print("here")
+ 
+     def retarget(self, ref_value, fixed_qpos, last_qpos):
+         """
+@@ -74,6 +74,7 @@ class Optimizer:
+         Returns: joint position of robot, the joint order and dim is consistent with self.target_joint_names
+ 
+         """
++        # pdb.set_trace()
+         if len(fixed_qpos) != len(self.idx_pin2fixed):
+             raise ValueError(
+                 f"Optimizer has {len(self.idx_pin2fixed)} joints but non_target_qpos {fixed_qpos} is given"
+@@ -502,7 +503,7 @@ class DexPilotOptimizer(Optimizer):
+                 # In the original DexPilot, γ = 2.5 × 10−3 is a weight on regularizing the Allegro angles to zero
+                 # which is equivalent to fully opened the hand
+                 # In our implementation, we regularize the joint angles to the previous joint angles
+-                grad_qpos += 2 * self.norm_delta * (x - last_qpos)
++                grad_qpos += 2 * self.norm_delta * (x - last_qpos) 
+ 
+                 grad[:] = grad_qpos[:]
+ 
+diff --git a/dex_retargeting/retargeting_config.py b/dex_retargeting/retargeting_config.py
+index a970238..04cacf5 100644
+--- a/dex_retargeting/retargeting_config.py
++++ b/dex_retargeting/retargeting_config.py
+@@ -14,6 +14,7 @@ from dex_retargeting.robot_wrapper import RobotWrapper
+ from dex_retargeting.seq_retarget import SeqRetargeting
+ from dex_retargeting.yourdfpy import DUMMY_JOINT_NAMES
+ 
++import pdb 
+ 
+ @dataclass
+ class RetargetingConfig:
+@@ -124,7 +125,7 @@ class RetargetingConfig:
+         path = Path(config_path)
+         if not path.is_absolute():
+             path = path.absolute()
+-
++        
+         with path.open("r") as f:
+             yaml_config = yaml.load(f, Loader=yaml.FullLoader)
+             cfg = yaml_config["retargeting"]
+@@ -137,6 +138,7 @@ class RetargetingConfig:
+         if override is not None:
+             for key, value in override.items():
+                 cfg[key] = value
++        #pdb.set_trace()
+         config = RetargetingConfig(**cfg)
+         return config
+ 
+@@ -203,7 +205,6 @@ class RetargetingConfig:
+             lp_filter = LPFilter(self.low_pass_alpha)
+         else:
+             lp_filter = None
+-
+         # Parse mimic joints and set kinematics adaptor for optimizer
+         has_mimic_joints, source_names, mimic_names, multipliers, offsets = parse_mimic_joint(robot_urdf)
+         if has_mimic_joints and not self.ignore_mimic_joint:
+@@ -222,7 +223,6 @@ class RetargetingConfig:
+                 "To disable mimic joint adaptor, consider setting ignore_mimic_joint=True in the configuration.",
+                 "\033[39m",
+             )
+-
+         retargeting = SeqRetargeting(
+             optimizer,
+             has_joint_limits=self.has_joint_limits,
+diff --git a/dex_retargeting/seq_retarget.py b/dex_retargeting/seq_retarget.py
+index 8949561..452daf4 100644
+--- a/dex_retargeting/seq_retarget.py
++++ b/dex_retargeting/seq_retarget.py
+@@ -1,6 +1,6 @@
+ import time
+ from typing import Optional
+-
++import pdb
+ import numpy as np
+ from pytransform3d import rotations
+ 
+@@ -33,7 +33,7 @@ class SeqRetargeting:
+         self.last_qpos = joint_limits.mean(1)[self.optimizer.idx_pin2target].astype(np.float32)
+         self.accumulated_time = 0
+         self.num_retargeting = 0
+-
++        self.first_retarget = True
+         # Filter
+         self.filter = lp_filter
+ 
+@@ -64,13 +64,13 @@ class SeqRetargeting:
+             raise ValueError(f"Wrist pos: {wrist_pos} is not a 3-dim vector.")
+         if len(wrist_quat) != 4:
+             raise ValueError(f"Wrist quat: {wrist_quat} is not a 4-dim vector.")
+-
+-        operator2mano = OPERATOR2MANO[hand_type] if is_mano_convention else np.eye(3)
++        #pdb.set_trace()
++        operator2mano = OPERATOR2MANO[hand_type]  if is_mano_convention else np.eye(3) #
+         robot = self.optimizer.robot
+         target_wrist_pose = np.eye(4)
+         target_wrist_pose[:3, :3] = rotations.matrix_from_quaternion(wrist_quat) @ operator2mano.T
+         target_wrist_pose[:3, 3] = wrist_pos
+-
++        #pdb.set_trace()
+         name_list = [
+             "dummy_x_translation_joint",
+             "dummy_y_translation_joint",
+@@ -84,6 +84,7 @@ class SeqRetargeting:
+         # Set the dummy joints angles to zero
+         old_qpos = robot.q0
+         new_qpos = old_qpos.copy()
++        # pdb.set_trace()
+         for num, joint_name in enumerate(self.optimizer.target_joint_names):
+             if joint_name in name_list:
+                 new_qpos[num] = 0
+@@ -94,7 +95,7 @@ class SeqRetargeting:
+ 
+         euler = rotations.euler_from_matrix(target_root_pose[:3, :3], 0, 1, 2, extrinsic=False)
+         pose_vec = np.concatenate([target_root_pose[:3, 3], euler])
+-
++        #pdb.set_trace()
+         # Find the dummy joints
+         for num, joint_name in enumerate(self.optimizer.target_joint_names):
+             if joint_name in name_list:
+@@ -105,7 +106,6 @@ class SeqRetargeting:
+ 
+     def retarget(self, ref_value, fixed_qpos=np.array([])):
+         tic = time.perf_counter()
+-
+         qpos = self.optimizer.retarget(
+             ref_value=ref_value.astype(np.float32),
+             fixed_qpos=fixed_qpos.astype(np.float32),
+diff --git a/example/position_retargeting/dataset.py b/example/position_retargeting/dataset.py
+index 68ec06a..d64a783 100644
+--- a/example/position_retargeting/dataset.py
++++ b/example/position_retargeting/dataset.py
+@@ -263,6 +263,7 @@ class DexYCBVideoDataset:
+             with mano_file.open(mode="r") as f:
+                 shape_parameters = yaml.load(f, Loader=yaml.FullLoader)
+             mano_name = "_".join(cali_dir.stem.split("_")[1:])
++            # TODO: Input the correct shape parameters
+             mano_parameters[mano_name] = np.array(shape_parameters["betas"])
+ 
+         return mano_parameters
+diff --git a/example/position_retargeting/hand_object.webp b/example/position_retargeting/hand_object.webp
+deleted file mode 100644
+index 21441ff..0000000
+Binary files a/example/position_retargeting/hand_object.webp and /dev/null differ
+diff --git a/example/position_retargeting/hand_robot_viewer.py b/example/position_retargeting/hand_robot_viewer.py
+index 4690f5d..6e7aa66 100644
+--- a/example/position_retargeting/hand_robot_viewer.py
++++ b/example/position_retargeting/hand_robot_viewer.py
+@@ -35,6 +35,7 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
+         loader = self.scene.create_urdf_loader()
+         loader.fix_root_link = True
+         loader.load_multiple_collisions_from_file = True
++        
+         for robot_name in robot_names:
+             config_path = get_default_config_path(robot_name, RetargetingType.position, hand_type)
+ 
+@@ -126,7 +127,7 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
+                 joint[0, :],
+                 wrist_quat,
+                 hand_type=self.hand_type,
+-                is_mano_convention=True,
++                is_mano_convention=False,
+             )
+ 
+         # Loop rendering
+diff --git a/example/position_retargeting/mano_layer.py b/example/position_retargeting/mano_layer.py
+index 09249e0..a6409d1 100644
+--- a/example/position_retargeting/mano_layer.py
++++ b/example/position_retargeting/mano_layer.py
+@@ -5,10 +5,11 @@
+ """Wrapper layer for manopth ManoLayer."""
+ 
+ import torch
++import numpy as np
+ 
+ from torch.nn import Module
+ from manopth.manolayer import ManoLayer
+-
++import pdb
+ 
+ class MANOLayer(Module):
+     """Wrapper layer for manopth ManoLayer."""
+@@ -23,17 +24,26 @@ class MANOLayer(Module):
+ 
+         self._side = side
+         self._betas = betas
+-        self._mano_layer = ManoLayer(flat_hand_mean=False,
+-                                     ncomps=45,
+-                                     side=self._side,
+-                                     mano_root='manopth/mano/models',
+-                                     use_pca=True)
++        # self._mano_layer =  ManoLayer(center_idx=0,
++        #                              mano_root='manopth/mano/models'
++        #                              ) #False
++                                     
++        self._mano_layer =  ManoLayer(flat_hand_mean=True,
++                    ncomps=15, # 15,
++                    side=self._side,
++                    center_idx=0,
++                    mano_root='manopth/mano/models',
++                    use_pca=False) #False
++        # self._mano_layer = ManoLayer(flat_hand_mean=False,
++        #                              ncomps=45,
++        #                              side=self._side,
++        #                              mano_root='manopth/mano/models',
++        #                              use_pca=True)
+ 
+         b = torch.from_numpy(self._betas).unsqueeze(0)
+         f = self._mano_layer.th_faces
+         self.register_buffer('b', b)
+         self.register_buffer('f', f)
+-
+         v = torch.matmul(self._mano_layer.th_shapedirs, self.b.transpose(
+             0, 1)).permute(2, 0, 1) + self._mano_layer.th_v_template
+         r = torch.matmul(self._mano_layer.th_J_regressor[0], v)
+@@ -48,7 +58,26 @@ class MANOLayer(Module):
+           v: A tensor of shape [B, 778, 3] containing the vertices.
+           j: A tensor of shape [B, 21, 3] containing the joints.
+         """
++        if isinstance(p, np.ndarray):
++            p = torch.from_numpy(p).to(torch.float32)
++        if isinstance(t, np.ndarray):
++            t = torch.from_numpy(t).to(torch.float32)
+         v, j = self._mano_layer(p, self.b.expand(p.size(0), -1), t)
+         v /= 1000
+         j /= 1000
+-        return v, j
+\ No newline at end of file
++        # pdb.set_trace()
++        return v, j
++    
++    def forward_wo_p(self, p):
++      """Forward function.
++      Args:
++        p: A tensor of shape [B, 48] containing the pose.
++        t: A tensor of shape [B, 3] containing the trans.
++      Returns:
++        v: A tensor of shape [B, 778, 3] containing the vertices.
++        j: A tensor of shape [B, 21, 3] containing the joints.
++      """
++      v, j = self._mano_layer(p, self.b.expand(p.size(0), -1))
++      v /= 1000
++      j /= 1000
++      return v, j
+\ No newline at end of file

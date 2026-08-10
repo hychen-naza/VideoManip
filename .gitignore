@@ -1,0 +1,135 @@
+# ==== VideoManip .gitignore ====
+# Goal: keep CODE (your scripts + external-repo modifications), exclude all
+# data, model weights, caches, virtualenvs, and anything > GitHub's 100MB limit.
+
+# ---- model weights / checkpoints ----
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.engine
+*.safetensors
+*.bin
+*.h5
+*.hdf5
+*.pkl
+*.npy
+*.npz
+
+# ---- big media / archives ----
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.7z
+
+# ---- compiled / build artifacts ----
+*.so
+*.o
+*.a
+*.dylib
+*.pyc
+__pycache__/
+*.egg-info/
+build/
+dist/
+*.stl
+# NOTE: *.obj intentionally NOT globally ignored (small URDF visual meshes are
+# assets). Large reconstructed meshes live in ignored data dirs below; a final
+# size sweep catches any stragglers.
+
+# ---- python envs / tooling caches ----
+.venv/
+venv/
+env/
+.env
+node_modules/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.DS_Store
+
+# ---- moved-aside nested git repos (temporary, during upload) ----
+*.videomanip-bak/
+**/*.videomanip-bak/
+
+# ---- oversized rendered result images ----
+**/comparison_all_frames.png
+paper_plot/method/*_results/
+
+# ---- secrets ----
+*.pem
+*.key
+id_rsa*
+credentials*
+*secret*
+.env.*
+
+# ---- data / weights directories ----
+# Vendored FoundationPose is NOT tracked; see foundationpose/ for our code.
+FoundationPose/
+trained_models/
+hamer/_DATA/
+hamer/out_demo/
+hamer/debug_params/
+DemoGen/data/
+DemoGen/demo_generation/outputs/
+ContactOpt/data/
+ContactOpt/checkpoints/
+sam2/checkpoints/
+sam2/demo/data/
+3D-Diffusion-Policy/3D-Diffusion-Policy/data/
+real-baseline-evaluate/openpi/finetuned_checkpoint/
+real-baseline-evaluate/openpi/.venv/
+video_img_input/
+single_hand_video/
+
+# ---- generic data/output/debug dirs anywhere ----
+**/checkpoints/
+**/outputs/
+**/wandb/
+**/logs/
+**/debug/
+**/results/
+**/*.zarr/
+**/calibrate_info/
+**/nohup.out
+
+*.videomanip-bak
+
+# ---- downstream training/eval — NOT part of the reconstruction pipeline ----
+3D-Diffusion-Policy/
+DemoGen/
+real-baseline-evaluate/
+real-evaluate/
+sim-evaluate/
+sim-replay/
+paper_plot/
+old_code/
+src/
+assets/
+third_party/
+.claude/
+grasp_dataset_save_sim.py
+grasp_dataset_split.py
+grasp_index.json
+two_object_dataset_save.py
+
+# stray documents
+*.pdf
+
+# ---- reconstruction pipeline working dirs & generated assets ----
+# Per-object outputs produced by reconstruction/process_videos.sh.
+reconstruction/data/
+# Robot-hand meshes are generated from the dex-urdf assets submodule by
+# reconstruction/dex_retargeting/prepare_hand_meshes.py -- do not commit them.
+reconstruction/dex_retargeting/added/example/position_retargeting/*/meshes/
+
+# ---- example input video (small, intentionally tracked) ----
+# The global *.mp4 rule above would otherwise exclude it.
+!reconstruction/example_data/*.mp4

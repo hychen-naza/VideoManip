@@ -1,0 +1,31 @@
+diff --git a/sam2/utils/misc.py b/sam2/utils/misc.py
+index b65ee82..5063410 100644
+--- a/sam2/utils/misc.py
++++ b/sam2/utils/misc.py
+@@ -12,7 +12,7 @@ import numpy as np
+ import torch
+ from PIL import Image
+ from tqdm import tqdm
+-
++import pdb
+ 
+ def get_sdpa_settings():
+     if torch.cuda.is_available():
+@@ -239,13 +239,14 @@ def load_video_frames_from_jpg_images(
+             "where `-q:v` generates high-quality JPEG frames and `-start_number 0` asks "
+             "ffmpeg to start the JPEG file from 00000.jpg."
+         )
+-
++    #pdb.set_trace()
+     frame_names = [
+         p
+         for p in os.listdir(jpg_folder)
+-        if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
++        if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"]
+     ]
+-    frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
++    #frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
++    frame_names.sort()
+     num_frames = len(frame_names)
+     if num_frames == 0:
+         raise RuntimeError(f"no images found in {jpg_folder}")
