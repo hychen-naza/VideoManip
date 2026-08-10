@@ -36,6 +36,37 @@ cd reconstruction
 That processes `reconstruction/example_data/real_14_pourtea.mp4` and writes
 everything to `reconstruction/data/real_14_pourtea/`.
 
+### Recommended: go one stage at a time
+
+The command above runs everything end to end, which is the right thing once a
+video is known to work. **The first time — and every time you try a new video —
+run the stages individually instead:**
+
+```bash
+export OBJ=real_14_pourtea                      # your object name
+
+./process_videos.sh --stages frames      $OBJ   # then look at data/$OBJ/rgb/
+./process_videos.sh --stages clicks      $OBJ
+./process_videos.sh --stages intrinsics  $OBJ   # then look at data/$OBJ/depth/
+./process_videos.sh --stages hand_mesh   $OBJ   # then look at the *_all.jpg overlays
+./process_videos.sh --stages masks       $OBJ   # then look at data/$OBJ/masks_pred_obj/
+...                                             # see section 6 for stages 6-8
+```
+
+Why it is worth the extra typing:
+- **Every stage feeds the next.** A drifting segmentation mask or a hand that
+  was never detected does not announce itself — it quietly produces a bad
+  trajectory eight stages later. Each stage writes images you can just look at.
+- **The costs are lopsided.** Stage 6 spends real money on API calls and stage 7
+  is the slowest by far. You do not want to reach either one on top of a bad
+  mask.
+- **Stage 2 is interactive** and its clicks determine everything downstream.
+- **Prerequisites differ per stage** (weights, API keys, Docker, DRO-Grasp);
+  discovering a missing one in isolation is much easier to act on.
+
+[Section 6](#6-step-by-step-walkthrough) walks through all eight stages with the
+exact command, the expected output, and a check for each.
+
 **Nothing is hardcoded to a particular machine.** Every path is resolved
 relative to the repository, and anything machine-specific is a flag or an
 environment variable.
@@ -109,6 +140,30 @@ These are **not** shipped here:
 | DRO-Grasp (robot URDFs / point clouds) | sibling checkout, or `DRO_GRASP_ROOT` | needed by stage 8 only |
 
 MoGe (stage 3) downloads its own weights from Hugging Face on first run.
+
+### 3.5 Paid API keys — stage 6 only
+
+Object-mesh generation (`obj_mesh`) is the one stage that costs money. It calls
+two external services:
+
+| Service | What it does | Key |
+|---------|--------------|-----|
+| [OpenAI](https://platform.openai.com) | Inpaints the occluded object in the cropped frame so the mesh is complete | `OPENAI_API_KEY` |
+| [Meshy](https://meshy.ai) | Turns that image into a textured 3D mesh (image-to-3D) | `MESHY_API_KEY` |
+
+```bash
+export OPENAI_API_KEY=sk-...
+export MESHY_API_KEY=msy_...
+```
+
+Without both keys the stage **skips** with a message and the pipeline continues.
+To keep going without paying, supply your own mesh instead — anything trimesh can
+load:
+```bash
+mkdir -p reconstruction/data/<object>/mesh_original
+cp my_object.obj reconstruction/data/<object>/mesh_original/textured_simple_grasp.obj
+```
+Keys are read from the environment only; never commit them.
 
 ---
 
@@ -193,10 +248,13 @@ than failing, they **skip with instructions** so the rest of the run completes:
 
 ## 6. Step-by-step walkthrough
 
-Run the whole thing at once with `./process_videos.sh`, or walk it one stage at a
-time as below. Each step lists the exact command, what it writes, and how to
-check it worked. Commands assume `conda activate video` and `cd reconstruction`.
-`OBJ` is the object name — `real_14_pourtea` for the bundled example.
+**Work through these one at a time**, checking each stage's output before moving
+on — see [why](#recommended-go-one-stage-at-a-time). Every step below lists the
+exact command, what it writes, and a check that it worked. Once a video makes it
+through cleanly you can run all eight in a single command.
+
+Commands assume `conda activate video` and `cd reconstruction`. `OBJ` is the
+object name — `real_14_pourtea` for the bundled example.
 
 ```bash
 export OBJ=real_14_pourtea

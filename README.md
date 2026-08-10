@@ -46,8 +46,32 @@ cd reconstruction
 ./process_videos.sh                                # runs the bundled example video
 ```
 
+> **Run it one stage at a time the first time through.** The pipeline has eight
+> stages with very different runtimes and prerequisites, and each one's output is
+> worth eyeballing before you feed it to the next. `./process_videos.sh --stages
+> frames`, then `--stages intrinsics`, and so on — a bad segmentation mask or a
+> missed hand detection is obvious immediately and cheap to redo, but expensive to
+> discover at the end of a full run. Once a video works, run all eight together.
+
 Full instructions, a stage-by-stage walkthrough, and troubleshooting live in
 **[`reconstruction/README.md`](reconstruction/README.md)**.
+
+---
+
+## What you need
+
+| | |
+|---|---|
+| **GPU** | One NVIDIA GPU. Reference timings below are from an RTX 4090; ~4 min for the bundled 148-frame example. |
+| **Model weights** | MANO, HaMeR + ViTPose, SAM 2. Free, but MANO requires accepting a licence. MoGe downloads itself. |
+| **Paid API keys** (stage 6 only) | Object-mesh generation calls the **[Meshy](https://meshy.ai) image-to-3D API** and the **OpenAI API** — both are paid services. Set `MESHY_API_KEY` and `OPENAI_API_KEY`. |
+| **Docker** (stage 7 only) | 6-DoF object pose runs FoundationPose in a container, from a separate checkout. |
+| **DRO-Grasp** (stage 8 only) | Robot URDFs and point clouds for hand retargeting. |
+
+**The pipeline runs without any of the optional items** — stages 6, 7 and 8 skip
+with instructions when their prerequisites are missing, and the rest completes.
+If you would rather not pay for stage 6, drop your own object mesh into
+`reconstruction/data/<object>/mesh_original/` and continue from stage 7.
 
 ---
 
