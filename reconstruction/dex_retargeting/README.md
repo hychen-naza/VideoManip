@@ -19,9 +19,8 @@ dex_retargeting/
   `example/position_retargeting/{dataset.py,hand_robot_viewer.py,mano_layer.py}`.
 - **Added files** (`added/`, copied into `dex-retargeting/`):
   - `example/position_retargeting/retarget_hand_object_common_inspire.py` — pipeline entry (stage 8).
-  - supporting scripts: `hand_robot_common.py`, `render_common.py`,
-    `robot_hand_mesh.py`, `image2mesh_render*.py`, `retarget_*` and the
-    `hand_utils/` package (optimization, multilateration, MANO fitting, …).
+  - supporting modules it imports: `hand_robot_common.py`, `render_common.py`,
+    `utils.py`, and `hand_utils/{hand_model,mesh_utils,func_utils,rotation}.py`.
   - robot URDFs for `inspire/`, `leap_hand/`, `shadow_hand/` and
     `dex_retargeting/configs/offline/umi_gripper.yml`.
 
@@ -40,11 +39,13 @@ cp -r reconstruction/dex_retargeting/added/. reconstruction/dex_retargeting/dex-
 pip install -e reconstruction/dex_retargeting/dex-retargeting
 #   MANO models (mano_v1_2) from https://mano.is.tue.mpg.de
 ```
-> **Robot visual meshes** (`.obj/.glb/.dae`) under
+> **Robot visual meshes** (`.obj`) under
 > `example/position_retargeting/{inspire,leap_hand,shadow_hand}/meshes/` are **not**
-> vendored (they duplicate the dex-urdf `assets` submodule). If a script reports a
-> missing mesh, copy it from
-> `reconstruction/dex_retargeting/dex-retargeting/assets/robots/hands/<hand>/meshes/`.
+> vendored — they are generated from the dex-urdf `assets` submodule, whose visual
+> meshes ship as `.glb`. `setup_externals.sh` does this for you; to redo it:
+> ```bash
+> python reconstruction/dex_retargeting/prepare_hand_meshes.py [--force]
+> ```
 
 ## Used by the pipeline
 `process_videos.sh` runs, from `reconstruction/dex_retargeting/dex-retargeting/example/position_retargeting/`:
